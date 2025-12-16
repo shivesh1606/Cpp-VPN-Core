@@ -19,6 +19,7 @@
 struct Client {
     sockaddr_in client_udp_addr;     ///< Actual (public) UDP address of client
     uint32_t android_client_tun_ip;  ///< Fixed IP inside Android TUN (10.8.0.2)
+    char xor_key;                  ///< Simple XOR key for this client
 };
 
 
@@ -59,13 +60,6 @@ private:
     std::unordered_map<uint32_t, Client> vpn_to_client;
 
     /**
-     * @brief Maps UDP "ip:port" → server-assigned VPN IP.
-     *
-     * Used when routing packets from client UDP → server TUN.
-     */
-    std::unordered_map<std::string, uint32_t> udp_to_vpn;
-
-    /**
      * @brief IP allocation pool.
      *
      * ipPool[i] = 0 → free
@@ -85,25 +79,6 @@ private:
      */
     uint32_t baseIp;
 
-    /**
-     * @brief Convert sockaddr_in to "ip:port" string key.
-     *
-     * Example:
-     *     49.12.33.5:55023
-     *
-     * Used as key for udp_to_vpn map.
-     */
-    std::string addrToKey(const sockaddr_in &addr) const;
-
-    /**
-     * @brief Retrieves and reserves the next free internal VPN IP.
-     *
-     * Scans ipPool for an unused entry.
-     *
-     * @return uint32_t Newly allocated VPN IP
-     *         (0 if no free IP available)
-     */
-    uint32_t getAvailableIp();
 
 public:
 
@@ -137,7 +112,7 @@ public:
      * @return uint32_t The server-assigned VPN IP
      *                   (0 if pool exhausted)
      */
-    Client* addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp);
+    Client* addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,char &xor_key);
 
     /**
      * @brief Removes a client using its server-assigned VPN IP.
@@ -168,12 +143,6 @@ public:
      */
     Client* getClientByUdp(const sockaddr_in &addr);
 
-    uint32_t getServerAssignedIp(const sockaddr_in &addr) {
-        std::string key = addrToKey(addr);
-        auto it = udp_to_vpn.find(key);
-        if (it == udp_to_vpn.end()) return 0;
-        return it->second;
-    }
     bool isIpInUse(uint32_t ip) const;
     bool makeIpInUse(uint32_t ip);
     Client* getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr,uint32_t clientTunIp);

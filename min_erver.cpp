@@ -12,6 +12,7 @@
 #include <algorithm> // for std::max
 #include "Encryption.h"
 #include "Client_Manager.h"
+#include "handshake.h"
 
 int create_tun(const char *name = "tun0")
 {
@@ -36,6 +37,7 @@ int create_tun(const char *name = "tun0")
 
 int main()
 {
+    std::vector<SessionState> client_connection_sessions;
     int tun = create_tun("tun0");
     // Example usage in your TUN/UDP loop
     Encryption &enc = Encryption::getInstance();
@@ -92,43 +94,141 @@ int main()
                           << ":" << ntohs(client_addr.sin_port) << "\n";
                 std::cout << "[UDP→TUN] " << n << " bytes\n";
                 // Decrypt data after receiving UDP
-                enc.decrypt((char *)buf, n, temp);
-
-                // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
-                if (n < 20)
+                if (n < (int)sizeof(PacketHeader))
                 {
-                    std::cout << "[WARN] decrypted packet too small (" << n << " bytes) - skipping\n";
+                    std::cout << "[WARN] Packet too small for header\n";
                     continue;
                 }
 
-                uint8_t ver_ihl = (uint8_t)temp[0];
-                uint8_t version = ver_ihl >> 4;
-                uint8_t ihl = ver_ihl & 0x0F;
-                uint8_t proto = (uint8_t)temp[9];
-                in_addr src_a;
-                memcpy(&src_a.s_addr, temp + 12, 4);
-                in_addr dst_a;
-                memcpy(&dst_a.s_addr, temp + 16, 4);
-                char s_src[64] = {0}, s_dst[64] = {0};
-                inet_ntop(AF_INET, &src_a, s_src, sizeof(s_src));
-                inet_ntop(AF_INET, &dst_a, s_dst, sizeof(s_dst));
-
-                std::cout << "[DEBUG] Decrypted packet: ver=" << unsigned(version)
-                          << " ihl=" << unsigned(ihl) << " proto=" << unsigned(proto)
-                          << " src=" << s_src << " dst=" << s_dst << " len=" << n << "\n";
-                uint32_t src_host = ntohl(src_a.s_addr);
-                client = cm.getClientByClientTunIpAndUdpAddr(client_addr, src_host);
-
-                if (!client)
+                PacketHeader *hdr = (PacketHeader *)buf;
+                if (hdr->type == PKT_HELLO)
                 {
-                    client = cm.addClient(client_addr, src_host);
-                    if (client == nullptr)
+                    if (n < (int)sizeof(HelloPacket))
                     {
-                        std::cerr << "[!] IP pool exhausted!" << std::endl;
+                        std::cout << "[WARN] Short HELLO packet\n";
                         continue;
                     }
+
+                    HelloPacket *hello = (HelloPacket *)buf;
+                    //
+                    std::cout << "[INFO] HELLO packet received, client_magic="
+                              << hello->client_magic << "\n";
+
+                    uint32_t assigned_ip = ntohl(inet_addr("10.8.0.12"));
+
+                    WelcomePacket welcome{};
+                    welcome.hdr.type = PKT_WELCOME;
+                    welcome.hdr.session_id = hello->client_magic; // unused for now
+                    welcome.assigned_tun_ip = htonl(assigned_ip);
+
+                    // Create SessionState for this client
+                    SessionState session{};
+                    session.client_udp_addr = client_addr;
+                    session.assigned_tun_ip = assigned_ip;
+                    session.client_magic = hello->client_magic;
+                    client_connection_sessions.push_back(session);
+                    sendto(sock,
+                           (char *)&welcome,
+                           sizeof(welcome),
+                           0,
+                           (struct sockaddr *)&client_addr,
+                           sizeof(client_addr));
+                    in_addr a{};
+                    a.s_addr = htonl(assigned_ip);
+                    std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
+                            << inet_ntoa(a) << "\n";
+
                 }
-                write(tun, temp, n);
+                else if (hdr->type == PKT_CLIENT_ACK)
+                {
+                    if (n < (int)sizeof(ClientAckPacket))
+                    {
+                        std::cout << "[WARN] Short ClientAckPacket packet\n";
+                        continue;
+                    }
+
+                    std::cout << "[INFO] CLIENT_ACK packet received\n";
+                    // check if session exists, etc.
+                    ClientAckPacket *ack = (ClientAckPacket *)buf;
+                    SessionState *session = nullptr;
+                    for (auto &s : client_connection_sessions)
+                    {
+                        if (s.client_udp_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
+                            s.client_udp_addr.sin_port == client_addr.sin_port)
+                        {
+                            session = &s;
+                            break;
+                        }
+                    }
+                    if (session == nullptr)
+                    {
+                        std::cout << "[WARN] CLIENT_ACK from unknown client\n";
+                        continue;
+                    }
+                    // Add client to ClientManager
+                    cm.addClient(client_addr, session->assigned_tun_ip, ack->xor_key);
+                    // Delete session state as handshake is complete
+                    client_connection_sessions.erase(
+                        std::remove_if(client_connection_sessions.begin(),
+                                       client_connection_sessions.end(),
+                                       [&](const SessionState &s)
+                                       {
+                                           return s.client_udp_addr.sin_addr.s_addr == session->client_udp_addr.sin_addr.s_addr &&
+                                                  s.client_udp_addr.sin_port == session->client_udp_addr.sin_port;
+                                       }),
+                        client_connection_sessions.end());
+                }
+                else if (hdr->type == PKT_DATA)
+                {
+                    std::cout << "[INFO] DATA packet received\n";
+                    client = cm.getClientByUdp(client_addr);
+
+                    if (!client)
+                    {
+                        std::cout << "[WARN] DATA packet from unknown client\n";
+                        continue;
+                    }
+                    // Encrypted payload starts AFTER header
+                    int enc_len = n - sizeof(PacketHeader);
+                    char *enc_payload = (char *)(buf + sizeof(PacketHeader));
+
+                    // Decrypt payload
+                    enc.decrypt(enc_payload, enc_len, temp, client->xor_key);
+
+                    // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
+                    if (enc_len < 20)
+                    {
+                        std::cout << "[WARN] decrypted packet too small (" << enc_len << " bytes) - skipping\n";
+                        continue;
+                    }
+
+                    // uint8_t ver_ihl = (uint8_t)temp[0];
+                    // uint8_t version = ver_ihl >> 4;
+                    // uint8_t ihl = ver_ihl & 0x0F;
+                    // uint8_t proto = (uint8_t)temp[9];
+                    // in_addr src_a;
+                    // memcpy(&src_a.s_addr, temp + 12, 4);
+                    // in_addr dst_a;
+                    // memcpy(&dst_a.s_addr, temp + 16, 4);
+                    // char s_src[64] = {0}, s_dst[64] = {0};
+                    // inet_ntop(AF_INET, &src_a, s_src, sizeof(s_src));
+                    // inet_ntop(AF_INET, &dst_a, s_dst, sizeof(s_dst));
+
+                    // std::cout << "[DEBUG] Decrypted packet: ver=" << unsigned(version)
+                    //           << " ihl=" << unsigned(ihl) << " proto=" << unsigned(proto)
+                    //           << " src=" << s_src << " dst=" << s_dst << " len=" << enc_len << "\n";
+                    // uint32_t src_host = ntohl(src_a.s_addr);
+
+                    write(tun, temp, enc_len);
+                    std::cout << "[UDP→TUN] Wrote " << enc_len << " bytes to TUN\n";
+                }
+                else
+                {
+
+                    std::cout << "[INFO] Non-DATA packet received, type="
+                              << int(hdr->type) << " (ignored for now)\n";
+                    continue;
+                }
             }
         }
 
@@ -137,9 +237,8 @@ int main()
             int n = read(tun, buf, sizeof(buf));
             if (n > 0)
             {
-             
-                uint8_t proto = (uint8_t)buf[9];
 
+                uint8_t proto = (uint8_t)buf[9];
 
                 in_addr src_a, dst_a;
                 memcpy(&src_a.s_addr, buf + 12, 4);
@@ -157,14 +256,26 @@ int main()
                 if (!target)
                 {
                     std::cout << "[TUN-IN] Unknown VPN destination IP: " << dst_host
-                            << " (" << s_dst << "), cannot forward\n";
+                              << " (" << s_dst << "), cannot forward\n";
                     continue;
                 }
                 std::cout << "[TUN→UDP] " << n << " bytes\n";
                 // Encrypt data before sending UDP
-                enc.encrypt((char *)buf, n, temp);
-                sendto(sock, temp, n, 0,(struct sockaddr *)&target->client_udp_addr,
-                               sizeof(target->client_udp_addr));
+                PacketHeader hdr;
+                hdr.type = PKT_DATA;
+                hdr.session_id = 0; // unused for now
+                                    // Copy header
+                memcpy(temp, &hdr, sizeof(hdr));
+                // Encrypt payload AFTER header
+                enc.encrypt((char *)buf, n, temp + sizeof(hdr), target->xor_key);
+
+                // Send header + encrypted payload
+                sendto(sock,
+                       temp,
+                       sizeof(hdr) + n,
+                       0,
+                       (struct sockaddr *)&target->client_udp_addr,
+                       sizeof(target->client_udp_addr));
             }
         }
     }

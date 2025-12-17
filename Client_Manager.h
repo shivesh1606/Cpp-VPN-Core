@@ -19,10 +19,14 @@
 struct Client {
     sockaddr_in client_udp_addr;     ///< Actual (public) UDP address of client
     uint32_t android_client_tun_ip;  ///< Fixed IP inside Android TUN (10.8.0.2)
-    char xor_key;                  ///< Simple XOR key for this client
+    uint8_t xor_key;                  ///< Simple XOR key for this client
 };
 
-
+enum IpState {
+    FREE = 0,
+    RESERVED = 1,
+    ACTIVE = 2
+};
 /**
  * @brief Manages all connected VPN clients and their virtual IPs.
  *
@@ -144,8 +148,12 @@ public:
     Client* getClientByUdp(const sockaddr_in &addr);
 
     bool isIpInUse(uint32_t ip) const;
+    bool isIpInStateActive(uint32_t ip) const;
     bool makeIpInUse(uint32_t ip);
+    uint32_t getNextAvailableIp();
     Client* getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr,uint32_t clientTunIp);
+    void freeIp(uint32_t ip);
+
 };
 
 // Client_Manager.h ends here

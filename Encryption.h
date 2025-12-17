@@ -20,12 +20,12 @@ public:
         return instance;
     }
 
-    void encrypt(const char data[], int len, char result[],char &xorkey) {
+    void encrypt(const char data[], int len, char result[],uint8_t &xorkey) {
         for (int i = 0; i < len; i++)
             result[i] = data[i] ^ xorkey;
     }
 
-    void decrypt(const char data[], int len, char result[] ,char &xorkey) {
+    void decrypt(const char data[], int len, char result[] ,uint8_t &xorkey) {
         for (int i = 0; i < len; i++)
             result[i] = data[i] ^ xorkey;
     }

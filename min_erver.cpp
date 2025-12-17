@@ -68,8 +68,30 @@ int main()
     socklen_t client_len = sizeof(client_addr);
     char client_ip[64];
     Client *client, *target;
+    const int HANDSHAKE_TIMEOUT = 10; // seconds
     while (true)
     {
+
+        time_t now = time(nullptr);
+        client_connection_sessions.erase(
+            std::remove_if(client_connection_sessions.begin(),
+                        client_connection_sessions.end(),
+                        [&](const SessionState &s) {
+                            if (now - s.created_at > HANDSHAKE_TIMEOUT) {
+                                in_addr a{};
+                                a.s_addr = htonl(s.assigned_tun_ip);
+                                std::cout << "[TIMEOUT] Handshake expired for IP "
+                                            << inet_ntoa(a)
+                                            << "\n";
+
+                                cm.freeIp(s.assigned_tun_ip); // 👈 IMPORTANT
+                                return true;
+                            }
+                            return false;
+                        }),
+            client_connection_sessions.end()
+        );
+
         fd_set rf;
         FD_ZERO(&rf);
         FD_SET(sock, &rf);
@@ -114,7 +136,13 @@ int main()
                     std::cout << "[INFO] HELLO packet received, client_magic="
                               << hello->client_magic << "\n";
 
-                    uint32_t assigned_ip = ntohl(inet_addr("10.8.0.12"));
+                    uint32_t nextAvailableIp = cm.getNextAvailableIp();
+                    if (nextAvailableIp == 0) {
+                        std::cout << "[ERROR] No available VPN IPs to assign\n";
+                        continue;
+                    }
+
+                    uint32_t assigned_ip = nextAvailableIp;
 
                     WelcomePacket welcome{};
                     welcome.hdr.type = PKT_WELCOME;
@@ -126,6 +154,7 @@ int main()
                     session.client_udp_addr = client_addr;
                     session.assigned_tun_ip = assigned_ip;
                     session.client_magic = hello->client_magic;
+                    session.created_at = time(nullptr);
                     client_connection_sessions.push_back(session);
                     sendto(sock,
                            (char *)&welcome,

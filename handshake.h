@@ -84,6 +84,7 @@ struct SessionState
     sockaddr_in client_udp_addr;  // Client's real-world UDP address
     uint32_t client_magic;      // Echoed from HELLO
     uint32_t assigned_tun_ip; // server-assigned VPN IP (host order)
+    time_t created_at;   // 👈 used for deletion of session state on HandshakeTime Expiry
 };
 #pragma pack(pop)
 

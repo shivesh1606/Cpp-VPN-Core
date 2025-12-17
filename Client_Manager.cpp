@@ -1,5 +1,6 @@
 #include "Client_Manager.h"
 #include <string>
+#include <iostream>
 
 ClientManager::ClientManager(int poolSize, const char* startIp) {
     // Initialize pool of available IPs
@@ -13,22 +14,24 @@ ClientManager::ClientManager(int poolSize, const char* startIp) {
 
 Client* ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,char &xor_key) {
 
-    bool ipInUse = isIpInUse(androidTunIp);
-    if(ipInUse){
+    bool ipisActive = isIpInStateActive(androidTunIp);
+    if(ipisActive){
         // This should never happen since getAvailableIp marks it as used
         return nullptr;
     }
 
-
+    
     Client newClient;
     newClient.client_udp_addr = clientUdpAddr;
     newClient.android_client_tun_ip = androidTunIp;
     newClient.xor_key = xor_key;
 
-    // Store both mappings
-    vpn_to_client[androidTunIp] = newClient;
-    makeIpInUse(androidTunIp);
-    return &vpn_to_client[androidTunIp];
+
+    
+    makeIpInUse(androidTunIp);  // ← THIS is where IP becomes ACTIVE
+    auto [it, inserted] = vpn_to_client.emplace(androidTunIp, newClient);
+    return &it->second;
+
 }
 
 
@@ -48,7 +51,11 @@ Client* ClientManager::getClientByUdp(const sockaddr_in &addr){
     }
     return nullptr;
 }
-
+bool ClientManager::isIpInUse(uint32_t ip) const {
+    uint32_t index = ip - baseIp;
+    if (index >= ipPool.size()) return false;
+    return ipPool[index] != IpState::FREE;
+}
 Client* ClientManager::getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr,uint32_t clientTunIp) {
     if(!isIpInUse(clientTunIp)){
         return nullptr;
@@ -60,22 +67,49 @@ Client* ClientManager::getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr,
        client.client_udp_addr.sin_port != addr.sin_port) {
         return nullptr;
     }
-    makeIpInUse(clientTunIp);
     return &vpn_to_client[clientTunIp];
 }
 
 
 
 
-bool ClientManager::isIpInUse(uint32_t ip) const{
+bool ClientManager::isIpInStateActive(uint32_t ip) const {
     uint32_t index = ip - baseIp;
     if (index >= ipPool.size()) return false;
-    return ipPool[index] == 1;
+    return ipPool[index] == IpState::ACTIVE;
 }
+
 
 bool ClientManager::makeIpInUse(uint32_t ip){
     uint32_t index = ip - baseIp;
     if (index >= ipPool.size()) return false;
-    ipPool[index] = 1;
+    ipPool[index]= IpState::ACTIVE;
     return true;
+}
+
+uint32_t ClientManager::getNextAvailableIp(){
+    for (size_t i = 0; i < ipPool.size(); ++i) {
+        if (ipPool[i] == 0) {
+            ipPool[i] = IpState::RESERVED; // Mark as reserved
+            return baseIp + i; // ❗ DO NOT MARK USED
+        }
+    }
+    return 0;
+}
+
+
+void ClientManager::freeIp(uint32_t ip) {
+    uint32_t index = ip - baseIp;
+    if (index >= ipPool.size()) {
+        std::cout << "[WARN] freeIp: invalid IP\n";
+        return;
+    }
+
+    if (ipPool[index] == 0) {
+        std::cout << "[WARN] Double free detected for IP\n";
+        return;
+    }
+
+    ipPool[index] = IpState::FREE;
+    vpn_to_client.erase(ip);
 }

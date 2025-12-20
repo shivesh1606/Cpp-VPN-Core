@@ -37,6 +37,7 @@ struct HelloPacket
 {
     PacketHeader hdr;
     uint32_t client_magic; // random value (just for uniqueness)
+    uint32_t yc;          // client's public value for Diffie-Hellman
 };
 #pragma pack(pop)
 
@@ -49,6 +50,7 @@ struct WelcomePacket
 {
     PacketHeader hdr;
     uint32_t assigned_tun_ip; // server-assigned VPN IP (host order)
+    uint32_t ys;            // server's public value for Diffie-Hellman
 };
 #pragma pack(pop)
 
@@ -60,7 +62,6 @@ struct WelcomePacket
 struct ClientAckPacket
 {
     PacketHeader hdr;
-    char xor_key; // Simple XOR key chosen by client
 };
 #pragma pack(pop)
 /*
@@ -85,6 +86,8 @@ struct SessionState
     uint32_t client_magic;      // Echoed from HELLO
     uint32_t assigned_tun_ip; // server-assigned VPN IP (host order)
     time_t created_at;   // 👈 used for deletion of session state on HandshakeTime Expiry
+    uint32_t yc;        // client's public value for Diffie-Hellman
+    uint32_t b;      // server private key ✅
 };
 #pragma pack(pop)
 

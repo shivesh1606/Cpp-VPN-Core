@@ -13,7 +13,7 @@
 #include "Encryption.h"
 #include "Client_Manager.h"
 #include "handshake.h"
-
+#include "utils.h"
 int create_tun(const char *name = "tun0")
 {
     struct ifreq ifr{};
@@ -148,13 +148,16 @@ int main()
                     welcome.hdr.type = PKT_WELCOME;
                     welcome.hdr.session_id = hello->client_magic; // unused for now
                     welcome.assigned_tun_ip = htonl(assigned_ip);
-
+                    long long random_b = randomNumGen(1000, 5000);
+                    welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
                     // Create SessionState for this client
                     SessionState session{};
                     session.client_udp_addr = client_addr;
                     session.assigned_tun_ip = assigned_ip;
                     session.client_magic = hello->client_magic;
                     session.created_at = time(nullptr);
+                    session.b = random_b; // server private key
+                    session.yc = ntohl(hello->yc); // Store client's public value
                     client_connection_sessions.push_back(session);
                     sendto(sock,
                            (char *)&welcome,
@@ -178,7 +181,6 @@ int main()
 
                     std::cout << "[INFO] CLIENT_ACK packet received\n";
                     // check if session exists, etc.
-                    ClientAckPacket *ack = (ClientAckPacket *)buf;
                     SessionState *session = nullptr;
                     for (auto &s : client_connection_sessions)
                     {
@@ -194,8 +196,12 @@ int main()
                         std::cout << "[WARN] CLIENT_ACK from unknown client\n";
                         continue;
                     }
+                    uint32_t shared_secret = modexp(session->yc, session->b, P);
+                    uint8_t xor_key = calculateXORKey(shared_secret);
+
+                    std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
                     // Add client to ClientManager
-                    cm.addClient(client_addr, session->assigned_tun_ip, ack->xor_key);
+                    cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
                     // Delete session state as handshake is complete
                     client_connection_sessions.erase(
                         std::remove_if(client_connection_sessions.begin(),

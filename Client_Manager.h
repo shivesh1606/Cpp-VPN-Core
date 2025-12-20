@@ -116,7 +116,7 @@ public:
      * @return uint32_t The server-assigned VPN IP
      *                   (0 if pool exhausted)
      */
-    Client* addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,char &xor_key);
+    Client* addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,uint8_t &xor_key);
 
     /**
      * @brief Removes a client using its server-assigned VPN IP.

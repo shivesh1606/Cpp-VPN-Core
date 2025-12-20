@@ -12,7 +12,7 @@ ClientManager::ClientManager(int poolSize, const char* startIp) {
 
 
 
-Client* ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,char &xor_key) {
+Client* ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,uint8_t &xor_key) {
 
     bool ipisActive = isIpInStateActive(androidTunIp);
     if(ipisActive){

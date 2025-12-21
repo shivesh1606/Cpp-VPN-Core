@@ -100,6 +100,12 @@ public:
      */
     ClientManager(int poolSize, const char* startIp);
 
+
+    /**
+     * @brief Destructor for ClientManager.
+     */
+    ~ClientManager();
+
     /**
      * @brief Adds a new client and assigns a server-side VPN IP.
      *

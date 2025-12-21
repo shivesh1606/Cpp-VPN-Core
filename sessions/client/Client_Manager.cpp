@@ -8,9 +8,13 @@ ClientManager::ClientManager(int poolSize, const char* startIp) {
 
     // Convert base IP string -> uint32 host order
     baseIp = ntohl(inet_addr(startIp));
+    std::cout << "[+] ClientManager initialized with IP pool starting at "
+              << startIp << " (" << (baseIp) << ") of size " << poolSize << "\n";
 }
 
-
+ClientManager::~ClientManager() {
+    std::cout << "[-] ClientManager destroyed\n";
+}
 
 Client* ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,uint8_t &xor_key) {
 

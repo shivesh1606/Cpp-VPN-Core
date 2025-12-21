@@ -5,43 +5,23 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#include <linux/if.h>
-#include <linux/if_tun.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <algorithm> // for std::max
-#include "Encryption.h"
-#include "Client_Manager.h"
-#include "handshake.h"
-#include "utils.h"
-int create_tun(const char *name = "tun0")
-{
-    struct ifreq ifr{};
-    int fd = open("/dev/net/tun", O_RDWR);
-    if (fd < 0)
-    {
-        perror("open /dev/net/tun");
-        exit(1);
-    }
-    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-    strncpy(ifr.ifr_name, name, IFNAMSIZ);
-    ifr.ifr_name[IFNAMSIZ - 1] = 0; // ensure null termination
-    if (ioctl(fd, TUNSETIFF, (void *)&ifr) < 0)
-    {
-        perror("ioctl TUNSETIFF");
-        exit(1);
-    }
-    std::cout << "[+] TUN created: " << ifr.ifr_name << "\n";
-    return fd;
-}
-
+#include "sessions/client/Client_Manager.h"
+#include "crypto/DiffieHellman.h"
+#include "net/tun/TunDevice.h"
+#include "crypto/XorCipher.h"
+#include "sessions/session/ClientSession.h"
+#include "protocol/Handshake.h"
 int main()
 {
-    std::vector<SessionState> client_connection_sessions;
-    int tun = create_tun("tun0");
-    // Example usage in your TUN/UDP loop
-    Encryption &enc = Encryption::getInstance();
+
+    ClientSession client_connection_sessions;
     ClientManager cm(100, "10.8.0.2");
+    int tun = TunDevice::create("tun0");
+    // Example usage in your TUN/UDP loop
+    XorCipher &enc = XorCipher::getInstance();
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
     {
@@ -72,26 +52,8 @@ int main()
     while (true)
     {
 
-        time_t now = time(nullptr);
-        client_connection_sessions.erase(
-            std::remove_if(client_connection_sessions.begin(),
-                        client_connection_sessions.end(),
-                        [&](const SessionState &s) {
-                            if (now - s.created_at > HANDSHAKE_TIMEOUT) {
-                                in_addr a{};
-                                a.s_addr = htonl(s.assigned_tun_ip);
-                                std::cout << "[TIMEOUT] Handshake expired for IP "
-                                            << inet_ntoa(a)
-                                            << "\n";
-
-                                cm.freeIp(s.assigned_tun_ip); // 👈 IMPORTANT
-                                return true;
-                            }
-                            return false;
-                        }),
-            client_connection_sessions.end()
-        );
-
+        // Periodically erase expired sessions
+        client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT);
         fd_set rf;
         FD_ZERO(&rf);
         FD_SET(sock, &rf);
@@ -151,14 +113,13 @@ int main()
                     long long random_b = randomNumGen(1000, 5000);
                     welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
                     // Create SessionState for this client
-                    SessionState session{};
-                    session.client_udp_addr = client_addr;
-                    session.assigned_tun_ip = assigned_ip;
-                    session.client_magic = hello->client_magic;
-                    session.created_at = time(nullptr);
-                    session.b = random_b; // server private key
-                    session.yc = ntohl(hello->yc); // Store client's public value
-                    client_connection_sessions.push_back(session);
+                    client_connection_sessions.addSession(
+                        client_addr,
+                        hello->client_magic,
+                        assigned_ip,
+                        ntohl(hello->yc),
+                        random_b);
+                        
                     sendto(sock,
                            (char *)&welcome,
                            sizeof(welcome),
@@ -181,16 +142,7 @@ int main()
 
                     std::cout << "[INFO] CLIENT_ACK packet received\n";
                     // check if session exists, etc.
-                    SessionState *session = nullptr;
-                    for (auto &s : client_connection_sessions)
-                    {
-                        if (s.client_udp_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-                            s.client_udp_addr.sin_port == client_addr.sin_port)
-                        {
-                            session = &s;
-                            break;
-                        }
-                    }
+                    SessionState *session = client_connection_sessions.getSession(client_addr);
                     if (session == nullptr)
                     {
                         std::cout << "[WARN] CLIENT_ACK from unknown client\n";
@@ -203,15 +155,7 @@ int main()
                     // Add client to ClientManager
                     cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
                     // Delete session state as handshake is complete
-                    client_connection_sessions.erase(
-                        std::remove_if(client_connection_sessions.begin(),
-                                       client_connection_sessions.end(),
-                                       [&](const SessionState &s)
-                                       {
-                                           return s.client_udp_addr.sin_addr.s_addr == session->client_udp_addr.sin_addr.s_addr &&
-                                                  s.client_udp_addr.sin_port == session->client_udp_addr.sin_port;
-                                       }),
-                        client_connection_sessions.end());
+                    client_connection_sessions.eraseSession(client_addr);
                 }
                 else if (hdr->type == PKT_DATA)
                 {
@@ -228,7 +172,7 @@ int main()
                     char *enc_payload = (char *)(buf + sizeof(PacketHeader));
 
                     // Decrypt payload
-                    enc.decrypt(enc_payload, enc_len, temp, client->xor_key);
+                    enc.crypt(enc_payload, enc_len, temp, client->xor_key);
 
                     // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
                     if (enc_len < 20)
@@ -237,22 +181,6 @@ int main()
                         continue;
                     }
 
-                    // uint8_t ver_ihl = (uint8_t)temp[0];
-                    // uint8_t version = ver_ihl >> 4;
-                    // uint8_t ihl = ver_ihl & 0x0F;
-                    // uint8_t proto = (uint8_t)temp[9];
-                    // in_addr src_a;
-                    // memcpy(&src_a.s_addr, temp + 12, 4);
-                    // in_addr dst_a;
-                    // memcpy(&dst_a.s_addr, temp + 16, 4);
-                    // char s_src[64] = {0}, s_dst[64] = {0};
-                    // inet_ntop(AF_INET, &src_a, s_src, sizeof(s_src));
-                    // inet_ntop(AF_INET, &dst_a, s_dst, sizeof(s_dst));
-
-                    // std::cout << "[DEBUG] Decrypted packet: ver=" << unsigned(version)
-                    //           << " ihl=" << unsigned(ihl) << " proto=" << unsigned(proto)
-                    //           << " src=" << s_src << " dst=" << s_dst << " len=" << enc_len << "\n";
-                    // uint32_t src_host = ntohl(src_a.s_addr);
 
                     write(tun, temp, enc_len);
                     std::cout << "[UDP→TUN] Wrote " << enc_len << " bytes to TUN\n";
@@ -302,7 +230,7 @@ int main()
                                     // Copy header
                 memcpy(temp, &hdr, sizeof(hdr));
                 // Encrypt payload AFTER header
-                enc.encrypt((char *)buf, n, temp + sizeof(hdr), target->xor_key);
+                enc.crypt((char *)buf, n, temp + sizeof(hdr), target->xor_key);
 
                 // Send header + encrypted payload
                 sendto(sock,

@@ -14,41 +14,114 @@
 #include "crypto/XorCipher.h"
 #include "sessions/session/ClientSession.h"
 #include "protocol/Handshake.h"
+#include "net/socket/SocketManager.h"
+
+void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
+                    unsigned char *buf, int &n,
+                    struct sockaddr_in &client_addr)
+
+{
+    // Placeholder for UDP to TUN handling logic
+    static char temp[2000];
+    Client *client;
+    // std::cout << "[INFO] DATA packet received\n";
+    client = cm.getClientByUdp(client_addr);
+
+    if (!client)
+    {
+        std::cout << "[WARN] DATA packet from unknown client\n";
+        return;
+    }
+    // Encrypted payload starts AFTER header
+    int enc_len = n - sizeof(PacketHeader);
+    char *enc_payload = (char *)(buf + sizeof(PacketHeader));
+
+    // Decrypt payload
+    enc.crypt(enc_payload, enc_len, temp, client->xor_key);
+
+    // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
+    if (enc_len < 20)
+    {
+        std::cout << "[WARN] decrypted packet too small (" << enc_len << " bytes) - skipping\n";
+        return;
+    }
+    ssize_t _ = write(tun, temp, enc_len);
+
+    // std::cout << "[UDP→TUN] Wrote " << enc_len << " bytes to TUN\n";
+}
+
+void handleTunToUdp(ClientManager &cm, XorCipher &enc, int &sock,
+                    unsigned char *buf, int &n)
+{
+    // static will break in multi-threaded envs, but fine for this simple example
+    static Client *target;
+    static char temp[2000];
+
+    // uint8_t proto = (uint8_t)buf[9];
+
+    in_addr src_a, dst_a;
+    memcpy(&src_a.s_addr, buf + 12, 4);
+    memcpy(&dst_a.s_addr, buf + 16, 4);
+    char s_src[64], s_dst[64];
+    inet_ntop(AF_INET, &src_a, s_src, sizeof(s_src));
+    inet_ntop(AF_INET, &dst_a, s_dst, sizeof(s_dst));
+
+    // std::cout << "[TUN-IN] IPv4 packet: proto=" << unsigned(proto)
+    //           << " src=" << s_src << " dst=" << s_dst
+    //           << " len=" << n << "\n";
+
+    uint32_t dst_host = ntohl(dst_a.s_addr);
+    target = cm.getClientByServerIp(dst_host);
+    if (!target)
+    {
+        std::cout << "[TUN-IN] Unknown VPN destination IP: " << dst_host
+                  << " (" << s_dst << "), cannot forward\n";
+        return;
+    }
+    // std::cout << "[TUN→UDP] " << n << " bytes\n";
+    // Encrypt data before sending UDP
+    PacketHeader hdr;
+    hdr.type = PKT_DATA;
+    hdr.session_id = 0; // unused for now
+                        // Copy header
+    memcpy(temp, &hdr, sizeof(hdr));
+    // Encrypt payload AFTER header
+    enc.crypt((char *)buf, n, temp + sizeof(hdr), target->xor_key);
+
+    // Send header + encrypted payload
+    sendto(sock,
+           temp,
+           sizeof(hdr) + n,
+           0,
+           (struct sockaddr *)&target->client_udp_addr,
+           sizeof(target->client_udp_addr));
+}
 int main()
 {
-
+    std::cout.setf(std::ios::unitbuf);  // <-- flush after every output
     ClientSession client_connection_sessions;
     ClientManager cm(100, "10.8.0.2");
     int tun = TunDevice::create("tun0");
     // Example usage in your TUN/UDP loop
     XorCipher &enc = XorCipher::getInstance();
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = SocketManager::createUdpSocket(5555);
     if (sock < 0)
     {
-        perror("socket");
+        std::cerr << "[ERROR] Failed to create UDP socket\n";
         return 1;
     }
-
-    struct sockaddr_in srv{};
-    srv.sin_family = AF_INET;
-    srv.sin_addr.s_addr = INADDR_ANY;
-    srv.sin_port = htons(5555);
-
-    if (bind(sock, (struct sockaddr *)&srv, sizeof(srv)) < 0)
-    {
-        perror("bind");
-        return 1;
-    }
-
-    std::cout << "[+] UDP listening on 0.0.0.0:5555\n";
-
     unsigned char buf[2000];
-    char temp[2000];
+    // char temp[2000];
     struct sockaddr_in client_addr{};
     socklen_t client_len = sizeof(client_addr);
     char client_ip[64];
-    Client *client, *target;
+    // Client *client, *target;
     const int HANDSHAKE_TIMEOUT = 10; // seconds
+    fcntl(sock, F_SETFL, O_NONBLOCK);
+    fcntl(tun, F_SETFL, O_NONBLOCK);
+
+    std::cout<<"Sock fd is {} and tun fd is {}"<<sock<<" "<<tun<<"\n";
+
     while (true)
     {
 
@@ -69,176 +142,137 @@ int main()
 
         if (FD_ISSET(sock, &rf))
         {
-            int n = recvfrom(sock, buf, sizeof(buf), 0,
-                             (struct sockaddr *)&client_addr, &client_len);
-            if (n > 0)
+            while (true)
             {
-                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-                std::cout << "[IN] Received " << n << " bytes from " << client_ip
-                          << ":" << ntohs(client_addr.sin_port) << "\n";
-                std::cout << "[UDP→TUN] " << n << " bytes\n";
-                // Decrypt data after receiving UDP
-                if (n < (int)sizeof(PacketHeader))
+                int n = recvfrom(sock, buf, sizeof(buf), 0,
+                                 (struct sockaddr *)&client_addr, &client_len);
+                if (n > 0)
                 {
-                    std::cout << "[WARN] Packet too small for header\n";
-                    continue;
-                }
 
-                PacketHeader *hdr = (PacketHeader *)buf;
-                if (hdr->type == PKT_HELLO)
-                {
-                    if (n < (int)sizeof(HelloPacket))
+                    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+                    // std::cout << "[IN] Received " << n << " bytes from " << client_ip
+                    //           << ":" << ntohs(client_addr.sin_port) << "\n";
+                    // std::cout << "[UDP→TUN] " << n << " bytes\n";
+                    // Decrypt data after receiving UDP
+                    if (n < (int)sizeof(PacketHeader))
                     {
-                        std::cout << "[WARN] Short HELLO packet\n";
+                        std::cout << "[WARN] Packet too small for header\n";
                         continue;
                     }
 
-                    HelloPacket *hello = (HelloPacket *)buf;
-                    //
-                    std::cout << "[INFO] HELLO packet received, client_magic="
-                              << hello->client_magic << "\n";
-
-                    uint32_t nextAvailableIp = cm.getNextAvailableIp();
-                    if (nextAvailableIp == 0) {
-                        std::cout << "[ERROR] No available VPN IPs to assign\n";
-                        continue;
-                    }
-
-                    uint32_t assigned_ip = nextAvailableIp;
-
-                    WelcomePacket welcome{};
-                    welcome.hdr.type = PKT_WELCOME;
-                    welcome.hdr.session_id = hello->client_magic; // unused for now
-                    welcome.assigned_tun_ip = htonl(assigned_ip);
-                    long long random_b = randomNumGen(1000, 5000);
-                    welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
-                    // Create SessionState for this client
-                    client_connection_sessions.addSession(
-                        client_addr,
-                        hello->client_magic,
-                        assigned_ip,
-                        ntohl(hello->yc),
-                        random_b);
-                        
-                    sendto(sock,
-                           (char *)&welcome,
-                           sizeof(welcome),
-                           0,
-                           (struct sockaddr *)&client_addr,
-                           sizeof(client_addr));
-                    in_addr a{};
-                    a.s_addr = htonl(assigned_ip);
-                    std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
-                            << inet_ntoa(a) << "\n";
-
-                }
-                else if (hdr->type == PKT_CLIENT_ACK)
-                {
-                    if (n < (int)sizeof(ClientAckPacket))
+                    PacketHeader *hdr = (PacketHeader *)buf;
+                    if (hdr->type == PKT_DATA)
                     {
-                        std::cout << "[WARN] Short ClientAckPacket packet\n";
-                        continue;
+                        handleUdpToTun(cm, enc, tun, buf, n, client_addr);
                     }
-
-                    std::cout << "[INFO] CLIENT_ACK packet received\n";
-                    // check if session exists, etc.
-                    SessionState *session = client_connection_sessions.getSession(client_addr);
-                    if (session == nullptr)
+                    else if (hdr->type == PKT_HELLO)
                     {
-                        std::cout << "[WARN] CLIENT_ACK from unknown client\n";
-                        continue;
+                        if (n < (int)sizeof(HelloPacket))
+                        {
+                            std::cout << "[WARN] Short HELLO packet\n";
+                            continue;
+                        }
+
+                        HelloPacket *hello = (HelloPacket *)buf;
+                        //
+                        // std::cout << "[INFO] HELLO packet received, client_magic="
+                        //           << hello->client_magic << "\n";
+
+                        uint32_t nextAvailableIp = cm.getNextAvailableIp();
+                        if (nextAvailableIp == 0)
+                        {
+                            std::cout << "[ERROR] No available VPN IPs to assign\n";
+                            continue;
+                        }
+
+                        uint32_t assigned_ip = nextAvailableIp;
+
+                        WelcomePacket welcome{};
+                        welcome.hdr.type = PKT_WELCOME;
+                        welcome.hdr.session_id = hello->client_magic; // unused for now
+                        welcome.assigned_tun_ip = htonl(assigned_ip);
+                        long long random_b = randomNumGen(1000, 5000);
+                        welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
+                        // Create SessionState for this client
+                        client_connection_sessions.addSession(
+                            client_addr,
+                            hello->client_magic,
+                            assigned_ip,
+                            ntohl(hello->yc),
+                            random_b);
+
+                        sendto(sock,
+                               (char *)&welcome,
+                               sizeof(welcome),
+                               0,
+                               (struct sockaddr *)&client_addr,
+                               sizeof(client_addr));
+                        in_addr a{};
+                        a.s_addr = htonl(assigned_ip);
+                        std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
+                                  << inet_ntoa(a) << "\n";
                     }
-                    uint32_t shared_secret = modexp(session->yc, session->b, P);
-                    uint8_t xor_key = calculateXORKey(shared_secret);
-
-                    std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
-                    // Add client to ClientManager
-                    cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
-                    // Delete session state as handshake is complete
-                    client_connection_sessions.eraseSession(client_addr);
-                }
-                else if (hdr->type == PKT_DATA)
-                {
-                    std::cout << "[INFO] DATA packet received\n";
-                    client = cm.getClientByUdp(client_addr);
-
-                    if (!client)
+                    else if (hdr->type == PKT_CLIENT_ACK)
                     {
-                        std::cout << "[WARN] DATA packet from unknown client\n";
-                        continue;
+                        if (n < (int)sizeof(ClientAckPacket))
+                        {
+                            std::cout << "[WARN] Short ClientAckPacket packet\n";
+                            continue;
+                        }
+
+                        // std::cout << "[INFO] CLIENT_ACK packet received\n";
+                        // check if session exists, etc.
+                        SessionState *session = client_connection_sessions.getSession(client_addr);
+                        if (session == nullptr)
+                        {
+                            std::cout << "[WARN] CLIENT_ACK from unknown client\n";
+                            continue;
+                        }
+                        uint32_t shared_secret = modexp(session->yc, session->b, P);
+                        uint8_t xor_key = calculateXORKey(shared_secret);
+
+                        // std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
+                        // Add client to ClientManager
+                        cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
+                        // Delete session state as handshake is complete
+                        client_connection_sessions.eraseSession(client_addr);
                     }
-                    // Encrypted payload starts AFTER header
-                    int enc_len = n - sizeof(PacketHeader);
-                    char *enc_payload = (char *)(buf + sizeof(PacketHeader));
 
-                    // Decrypt payload
-                    enc.crypt(enc_payload, enc_len, temp, client->xor_key);
-
-                    // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
-                    if (enc_len < 20)
+                    else
                     {
-                        std::cout << "[WARN] decrypted packet too small (" << enc_len << " bytes) - skipping\n";
+
+                        std::cout << "[INFO] Non-DATA packet received, type="
+                                  << int(hdr->type) << " (ignored for now)\n";
                         continue;
                     }
-
-
-                    write(tun, temp, enc_len);
-                    std::cout << "[UDP→TUN] Wrote " << enc_len << " bytes to TUN\n";
                 }
                 else
                 {
-
-                    std::cout << "[INFO] Non-DATA packet received, type="
-                              << int(hdr->type) << " (ignored for now)\n";
-                    continue;
+                    if (errno == EWOULDBLOCK || errno == EAGAIN)
+                    {
+                        break; // No more data to read
+                    }
+                    perror("recvfrom");
+                    break;
                 }
             }
         }
-
         if (FD_ISSET(tun, &rf))
         {
-            int n = read(tun, buf, sizeof(buf));
-            if (n > 0)
+            while (true)
             {
-
-                uint8_t proto = (uint8_t)buf[9];
-
-                in_addr src_a, dst_a;
-                memcpy(&src_a.s_addr, buf + 12, 4);
-                memcpy(&dst_a.s_addr, buf + 16, 4);
-                char s_src[64], s_dst[64];
-                inet_ntop(AF_INET, &src_a, s_src, sizeof(s_src));
-                inet_ntop(AF_INET, &dst_a, s_dst, sizeof(s_dst));
-
-                std::cout << "[TUN-IN] IPv4 packet: proto=" << unsigned(proto)
-                          << " src=" << s_src << " dst=" << s_dst
-                          << " len=" << n << "\n";
-
-                uint32_t dst_host = ntohl(dst_a.s_addr);
-                target = cm.getClientByServerIp(dst_host);
-                if (!target)
+                int n = read(tun, buf, sizeof(buf));
+                if (n < 0)
                 {
-                    std::cout << "[TUN-IN] Unknown VPN destination IP: " << dst_host
-                              << " (" << s_dst << "), cannot forward\n";
-                    continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        break;
+                    perror("read tun");
+                    break;
                 }
-                std::cout << "[TUN→UDP] " << n << " bytes\n";
-                // Encrypt data before sending UDP
-                PacketHeader hdr;
-                hdr.type = PKT_DATA;
-                hdr.session_id = 0; // unused for now
-                                    // Copy header
-                memcpy(temp, &hdr, sizeof(hdr));
-                // Encrypt payload AFTER header
-                enc.crypt((char *)buf, n, temp + sizeof(hdr), target->xor_key);
-
-                // Send header + encrypted payload
-                sendto(sock,
-                       temp,
-                       sizeof(hdr) + n,
-                       0,
-                       (struct sockaddr *)&target->client_udp_addr,
-                       sizeof(target->client_udp_addr));
+                if (n > 0)
+                {
+                    handleTunToUdp(cm, enc, sock, buf, n);
+                }
             }
         }
     }

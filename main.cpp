@@ -19,7 +19,9 @@
 #include <sys/time.h>
 
 constexpr int RX_BATCH = 8;
-constexpr int BUF_SIZE = 2000;
+constexpr int RX_BUF_SIZE = 2000;
+constexpr int TX_BATCH = 8;
+constexpr int TX_BUF_SIZE = 2000;
 
 void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
                     unsigned char *buf, int &n,
@@ -55,51 +57,93 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     // std::cout << "[UDP→TUN] Wrote " << enc_len << " bytes to TUN\n";
 }
 
-void handleTunToUdp(ClientManager &cm, XorCipher &enc, int &sock,
-                    unsigned char *buf, int &n)
+void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
+                     struct sockaddr_in &client_addr,
+                     int &sock,
+                     ClientSession &client_connection_sessions,
+                     ClientManager &cm)
 {
-    // static will break in multi-threaded envs, but fine for this simple example
-    static Client *target;
-    static char temp[2000];
-
-    // uint8_t proto = (uint8_t)buf[9];
-
-    in_addr src_a, dst_a;
-    memcpy(&src_a.s_addr, buf + 12, 4);
-    memcpy(&dst_a.s_addr, buf + 16, 4);
-    char s_src[64], s_dst[64];
-    inet_ntop(AF_INET, &src_a, s_src, sizeof(s_src));
-    inet_ntop(AF_INET, &dst_a, s_dst, sizeof(s_dst));
-
-    // std::cout << "[TUN-IN] IPv4 packet: proto=" << unsigned(proto)
-    //           << " src=" << s_src << " dst=" << s_dst
-    //           << " len=" << n << "\n";
-
-    uint32_t dst_host = ntohl(dst_a.s_addr);
-    target = cm.getClientByServerIp(dst_host);
-    if (!target)
+    // Placeholder for handshake handling logic
+    if (hdr->type == PKT_HELLO)
     {
-        std::cout << "[TUN-IN] Unknown VPN destination IP: " << dst_host
-                  << " (" << s_dst << "), cannot forward\n";
+        if (n < (int)sizeof(HelloPacket))
+        {
+            std::cout << "[WARN] Short HELLO packet\n";
+            return;
+        }
+
+        HelloPacket *hello = (HelloPacket *)buf;
+        //
+        // std::cout << "[INFO] HELLO packet received, client_magic="
+        //           << hello->client_magic << "\n";
+
+        uint32_t nextAvailableIp = cm.getNextAvailableIp();
+        if (nextAvailableIp == 0)
+        {
+            std::cout << "[ERROR] No available VPN IPs to assign\n";
+            return;
+        }
+
+        uint32_t assigned_ip = nextAvailableIp;
+
+        WelcomePacket welcome{};
+        welcome.hdr.type = PKT_WELCOME;
+        welcome.hdr.session_id = hello->client_magic; // unused for now
+        welcome.assigned_tun_ip = htonl(assigned_ip);
+        long long random_b = randomNumGen(1000, 5000);
+        welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
+        // Create SessionState for this client
+        client_connection_sessions.addSession(
+            client_addr,
+            hello->client_magic,
+            assigned_ip,
+            ntohl(hello->yc),
+            random_b);
+
+        sendto(sock,
+               (char *)&welcome,
+               sizeof(welcome),
+               0,
+               (struct sockaddr *)&client_addr,
+               sizeof(client_addr));
+        in_addr a{};
+        a.s_addr = htonl(assigned_ip);
+        std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
+                  << inet_ntoa(a) << "\n";
+    }
+    else if (hdr->type == PKT_CLIENT_ACK)
+    {
+        if (n < (int)sizeof(ClientAckPacket))
+        {
+            std::cout << "[WARN] Short ClientAckPacket packet\n";
+            return;
+        }
+
+        // std::cout << "[INFO] CLIENT_ACK packet received\n";
+        // check if session exists, etc.
+        SessionState *session = client_connection_sessions.getSession(client_addr);
+        if (session == nullptr)
+        {
+            std::cout << "[WARN] CLIENT_ACK from unknown client\n";
+            return;
+        }
+        uint32_t shared_secret = modexp(session->yc, session->b, P);
+        uint8_t xor_key = calculateXORKey(shared_secret);
+
+        // std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
+        // Add client to ClientManager
+        cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
+        // Delete session state as handshake is complete
+        client_connection_sessions.eraseSession(client_addr);
+    }
+
+    else
+    {
+
+        std::cout << "[INFO] Non-DATA packet received, type="
+                  << int(hdr->type) << " (ignored for now)\n";
         return;
     }
-    // std::cout << "[TUN→UDP] " << n << " bytes\n";
-    // Encrypt data before sending UDP
-    PacketHeader hdr;
-    hdr.type = PKT_DATA;
-    hdr.session_id = 0; // unused for now
-                        // Copy header
-    memcpy(temp, &hdr, sizeof(hdr));
-    // Encrypt payload AFTER header
-    enc.crypt((char *)buf, n, temp + sizeof(hdr), target->xor_key);
-
-    // Send header + encrypted payload
-    sendto(sock,
-           temp,
-           sizeof(hdr) + n,
-           0,
-           (struct sockaddr *)&target->client_udp_addr,
-           sizeof(target->client_udp_addr));
 }
 int main()
 {
@@ -125,7 +169,7 @@ int main()
     fcntl(sock, F_SETFL, O_NONBLOCK);
     fcntl(tun, F_SETFL, O_NONBLOCK);
 
-    std::cout << "Sock fd is {} and tun fd is {}" << sock << " " << tun << "\n";
+    std::cout << "Sock fd is " << sock << " and tun fd is " << tun << "\n";
 
     while (true)
     {
@@ -151,15 +195,19 @@ int main()
             struct mmsghdr msgs[RX_BATCH];
             struct iovec iovecs[RX_BATCH];
             struct sockaddr_in addrs[RX_BATCH];
-            unsigned char bufs[RX_BATCH][BUF_SIZE];
+            unsigned char bufs[RX_BATCH][RX_BUF_SIZE];
             memset(msgs, 0, sizeof(msgs));
+            memset(addrs, 0, sizeof(addrs));
             for (int i = 0; i < RX_BATCH; i++)
             {
                 iovecs[i].iov_base = bufs[i];
-                iovecs[i].iov_len = BUF_SIZE;
+                iovecs[i].iov_len = RX_BUF_SIZE;
 
                 msgs[i].msg_hdr.msg_iov = &iovecs[i];
                 msgs[i].msg_hdr.msg_iovlen = 1;
+                msgs[i].msg_hdr.msg_control = nullptr;
+                msgs[i].msg_hdr.msg_controllen = 0;
+
                 msgs[i].msg_hdr.msg_name = &addrs[i];
                 msgs[i].msg_hdr.msg_namelen = sizeof(addrs[i]);
             }
@@ -192,89 +240,13 @@ int main()
                         {
                             handleUdpToTun(cm, enc, tun, buf, n, client_addr);
                         }
-                        else if (hdr->type == PKT_HELLO)
-                        {
-                            if (n < (int)sizeof(HelloPacket))
-                            {
-                                std::cout << "[WARN] Short HELLO packet\n";
-                                continue;
-                            }
-
-                            HelloPacket *hello = (HelloPacket *)buf;
-                            //
-                            // std::cout << "[INFO] HELLO packet received, client_magic="
-                            //           << hello->client_magic << "\n";
-
-                            uint32_t nextAvailableIp = cm.getNextAvailableIp();
-                            if (nextAvailableIp == 0)
-                            {
-                                std::cout << "[ERROR] No available VPN IPs to assign\n";
-                                continue;
-                            }
-
-                            uint32_t assigned_ip = nextAvailableIp;
-
-                            WelcomePacket welcome{};
-                            welcome.hdr.type = PKT_WELCOME;
-                            welcome.hdr.session_id = hello->client_magic; // unused for now
-                            welcome.assigned_tun_ip = htonl(assigned_ip);
-                            long long random_b = randomNumGen(1000, 5000);
-                            welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
-                            // Create SessionState for this client
-                            client_connection_sessions.addSession(
-                                client_addr,
-                                hello->client_magic,
-                                assigned_ip,
-                                ntohl(hello->yc),
-                                random_b);
-
-                            sendto(sock,
-                                   (char *)&welcome,
-                                   sizeof(welcome),
-                                   0,
-                                   (struct sockaddr *)&client_addr,
-                                   sizeof(client_addr));
-                            in_addr a{};
-                            a.s_addr = htonl(assigned_ip);
-                            std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
-                                      << inet_ntoa(a) << "\n";
-                        }
-                        else if (hdr->type == PKT_CLIENT_ACK)
-                        {
-                            if (n < (int)sizeof(ClientAckPacket))
-                            {
-                                std::cout << "[WARN] Short ClientAckPacket packet\n";
-                                continue;
-                            }
-
-                            // std::cout << "[INFO] CLIENT_ACK packet received\n";
-                            // check if session exists, etc.
-                            SessionState *session = client_connection_sessions.getSession(client_addr);
-                            if (session == nullptr)
-                            {
-                                std::cout << "[WARN] CLIENT_ACK from unknown client\n";
-                                continue;
-                            }
-                            uint32_t shared_secret = modexp(session->yc, session->b, P);
-                            uint8_t xor_key = calculateXORKey(shared_secret);
-
-                            // std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
-                            // Add client to ClientManager
-                            cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
-                            // Delete session state as handshake is complete
-                            client_connection_sessions.eraseSession(client_addr);
-                        }
-
                         else
                         {
-
-                            std::cout << "[INFO] Non-DATA packet received, type="
-                                      << int(hdr->type) << " (ignored for now)\n";
-                            continue;
+                            handleHandshake(hdr, n, buf, client_addr, sock,
+                                            client_connection_sessions, cm);
                         }
                     }
                 }
-
                 else
                 {
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
@@ -291,6 +263,13 @@ int main()
         }
         if (FD_ISSET(tun, &rf))
         {
+            struct mmsghdr msgs[TX_BATCH];
+            struct iovec iovecs[TX_BATCH];
+            unsigned char bufs[TX_BATCH][TX_BUF_SIZE];
+
+            memset(msgs, 0, sizeof(msgs));
+            int batch_count = 0;
+
             while (true)
             {
                 int n = read(tun, main_loop_buf, sizeof(main_loop_buf));
@@ -301,9 +280,81 @@ int main()
                     perror("read tun");
                     break;
                 }
-                if (n > 0)
+
+                if (n == 0)
+                    break;
+
+                // ---- ORIGINAL LOGIC, INLINE ----
+                in_addr dst_a;
+                memcpy(&dst_a.s_addr, main_loop_buf + 16, 4);
+                uint32_t dst_host = ntohl(dst_a.s_addr);
+
+                Client *target = cm.getClientByServerIp(dst_host);
+                if (!target)
+                    continue;
+
+                PacketHeader hdr;
+                hdr.type = PKT_DATA;
+                hdr.session_id = 0;
+
+                unsigned char *out = bufs[batch_count];
+                memcpy(out, &hdr, sizeof(hdr));
+                enc.crypt((char *)main_loop_buf, n, (char *)out + sizeof(hdr), target->xor_key);
+
+                iovecs[batch_count].iov_base = out;
+                iovecs[batch_count].iov_len = sizeof(hdr) + n;
+
+                msgs[batch_count].msg_hdr.msg_iov = &iovecs[batch_count];
+                msgs[batch_count].msg_hdr.msg_iovlen = 1;
+                msgs[batch_count].msg_hdr.msg_name =
+                    &target->client_udp_addr;
+                msgs[batch_count].msg_hdr.msg_namelen =
+                    sizeof(target->client_udp_addr);
+
+                batch_count++;
+
+                // ---- FLUSH CONDITIONS ----
+                if (batch_count == TX_BATCH)
                 {
-                    handleTunToUdp(cm, enc, sock, main_loop_buf, n);
+                    int sent = sendmmsg(sock, msgs, batch_count, 0);
+                    if (sent < 0)
+                    {
+                        perror("sendmmsg");
+                        batch_count = 0;
+                    }
+                    else if (sent < batch_count)
+                    {
+                        // Drop remaining packets intentionally (UDP)
+                        // Optional debug log:
+                        std::cout << "[WARN] sendmmsg dropped "
+                                  << (batch_count - sent) << " packets\n";
+                        batch_count = 0;
+                    }
+                    else
+                    {
+                        batch_count = 0;
+                    }
+                }
+            }
+            if (batch_count > 0)
+            {
+                int sent = sendmmsg(sock, msgs, batch_count, 0);
+                if (sent < 0)
+                {
+                    perror("sendmmsg");
+                    batch_count = 0;
+                }
+                else if (sent < batch_count)
+                {
+                    // Drop remaining packets intentionally (UDP)
+                    // Optional debug log:
+                    std::cout << "[WARN] sendmmsg dropped "
+                              << (batch_count - sent) << " packets\n";
+                    batch_count = 0;
+                }
+                else
+                {
+                    batch_count = 0;
                 }
             }
         }

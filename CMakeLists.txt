@@ -24,10 +24,10 @@ target_include_directories(vpn_server PRIVATE
 )
 
 # ---------------- LD_PRELOAD shared library ----------------
-add_library(perf_hook_full SHARED
-    perf_hook_full.c
-)
+# add_library(perf_hook_full SHARED
+#     perf_hook_full.c
+# )
 
-target_link_libraries(perf_hook_full
-    dl       # needed for dlsym
-)
+# target_link_libraries(perf_hook_full
+#     dl       # needed for dlsym
+# )

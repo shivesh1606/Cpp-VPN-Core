@@ -15,6 +15,11 @@
 #include "sessions/session/ClientSession.h"
 #include "protocol/Handshake.h"
 #include "net/socket/SocketManager.h"
+#include <sys/uio.h>
+#include <sys/time.h>
+
+constexpr int RX_BATCH = 8;
+constexpr int BUF_SIZE = 2000;
 
 void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
                     unsigned char *buf, int &n,
@@ -98,7 +103,7 @@ void handleTunToUdp(ClientManager &cm, XorCipher &enc, int &sock,
 }
 int main()
 {
-    std::cout.setf(std::ios::unitbuf);  // <-- flush after every output
+    std::cout.setf(std::ios::unitbuf); // <-- flush after every output
     ClientSession client_connection_sessions;
     ClientManager cm(100, "10.8.0.2");
     int tun = TunDevice::create("tun0");
@@ -110,17 +115,17 @@ int main()
         std::cerr << "[ERROR] Failed to create UDP socket\n";
         return 1;
     }
-    unsigned char buf[2000];
+    unsigned char main_loop_buf[2000];
     // char temp[2000];
-    struct sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
+    // struct sockaddr_in client_addr{};
+    // socklen_t client_len = sizeof(client_addr);
     char client_ip[64];
     // Client *client, *target;
     const int HANDSHAKE_TIMEOUT = 10; // seconds
     fcntl(sock, F_SETFL, O_NONBLOCK);
     fcntl(tun, F_SETFL, O_NONBLOCK);
 
-    std::cout<<"Sock fd is {} and tun fd is {}"<<sock<<" "<<tun<<"\n";
+    std::cout << "Sock fd is {} and tun fd is {}" << sock << " " << tun << "\n";
 
     while (true)
     {
@@ -142,110 +147,134 @@ int main()
 
         if (FD_ISSET(sock, &rf))
         {
+            // Per-batch storage (stack-owned, safe)
+            struct mmsghdr msgs[RX_BATCH];
+            struct iovec iovecs[RX_BATCH];
+            struct sockaddr_in addrs[RX_BATCH];
+            unsigned char bufs[RX_BATCH][BUF_SIZE];
+            memset(msgs, 0, sizeof(msgs));
+            for (int i = 0; i < RX_BATCH; i++)
+            {
+                iovecs[i].iov_base = bufs[i];
+                iovecs[i].iov_len = BUF_SIZE;
+
+                msgs[i].msg_hdr.msg_iov = &iovecs[i];
+                msgs[i].msg_hdr.msg_iovlen = 1;
+                msgs[i].msg_hdr.msg_name = &addrs[i];
+                msgs[i].msg_hdr.msg_namelen = sizeof(addrs[i]);
+            }
+
             while (true)
             {
-                int n = recvfrom(sock, buf, sizeof(buf), 0,
-                                 (struct sockaddr *)&client_addr, &client_len);
-                if (n > 0)
+                int rcvd = recvmmsg(sock, msgs, RX_BATCH, 0, nullptr);
+
+                if (rcvd > 0)
                 {
+                    for (int i = 0; i < rcvd; i++)
+                    {
 
-                    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-                    // std::cout << "[IN] Received " << n << " bytes from " << client_ip
-                    //           << ":" << ntohs(client_addr.sin_port) << "\n";
-                    // std::cout << "[UDP→TUN] " << n << " bytes\n";
-                    // Decrypt data after receiving UDP
-                    if (n < (int)sizeof(PacketHeader))
-                    {
-                        std::cout << "[WARN] Packet too small for header\n";
-                        continue;
-                    }
-
-                    PacketHeader *hdr = (PacketHeader *)buf;
-                    if (hdr->type == PKT_DATA)
-                    {
-                        handleUdpToTun(cm, enc, tun, buf, n, client_addr);
-                    }
-                    else if (hdr->type == PKT_HELLO)
-                    {
-                        if (n < (int)sizeof(HelloPacket))
+                        int n = msgs[i].msg_len;
+                        unsigned char *buf = bufs[i];
+                        struct sockaddr_in &client_addr = addrs[i];
+                        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+                        // std::cout << "[IN] Received " << n << " bytes from " << client_ip
+                        //           << ":" << ntohs(client_addr.sin_port) << "\n";
+                        // std::cout << "[UDP→TUN] " << n << " bytes\n";
+                        // Decrypt data after receiving UDP
+                        if (n < (int)sizeof(PacketHeader))
                         {
-                            std::cout << "[WARN] Short HELLO packet\n";
+                            std::cout << "[WARN] Packet too small for header\n";
                             continue;
                         }
 
-                        HelloPacket *hello = (HelloPacket *)buf;
-                        //
-                        // std::cout << "[INFO] HELLO packet received, client_magic="
-                        //           << hello->client_magic << "\n";
-
-                        uint32_t nextAvailableIp = cm.getNextAvailableIp();
-                        if (nextAvailableIp == 0)
+                        PacketHeader *hdr = (PacketHeader *)buf;
+                        if (hdr->type == PKT_DATA)
                         {
-                            std::cout << "[ERROR] No available VPN IPs to assign\n";
-                            continue;
+                            handleUdpToTun(cm, enc, tun, buf, n, client_addr);
+                        }
+                        else if (hdr->type == PKT_HELLO)
+                        {
+                            if (n < (int)sizeof(HelloPacket))
+                            {
+                                std::cout << "[WARN] Short HELLO packet\n";
+                                continue;
+                            }
+
+                            HelloPacket *hello = (HelloPacket *)buf;
+                            //
+                            // std::cout << "[INFO] HELLO packet received, client_magic="
+                            //           << hello->client_magic << "\n";
+
+                            uint32_t nextAvailableIp = cm.getNextAvailableIp();
+                            if (nextAvailableIp == 0)
+                            {
+                                std::cout << "[ERROR] No available VPN IPs to assign\n";
+                                continue;
+                            }
+
+                            uint32_t assigned_ip = nextAvailableIp;
+
+                            WelcomePacket welcome{};
+                            welcome.hdr.type = PKT_WELCOME;
+                            welcome.hdr.session_id = hello->client_magic; // unused for now
+                            welcome.assigned_tun_ip = htonl(assigned_ip);
+                            long long random_b = randomNumGen(1000, 5000);
+                            welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
+                            // Create SessionState for this client
+                            client_connection_sessions.addSession(
+                                client_addr,
+                                hello->client_magic,
+                                assigned_ip,
+                                ntohl(hello->yc),
+                                random_b);
+
+                            sendto(sock,
+                                   (char *)&welcome,
+                                   sizeof(welcome),
+                                   0,
+                                   (struct sockaddr *)&client_addr,
+                                   sizeof(client_addr));
+                            in_addr a{};
+                            a.s_addr = htonl(assigned_ip);
+                            std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
+                                      << inet_ntoa(a) << "\n";
+                        }
+                        else if (hdr->type == PKT_CLIENT_ACK)
+                        {
+                            if (n < (int)sizeof(ClientAckPacket))
+                            {
+                                std::cout << "[WARN] Short ClientAckPacket packet\n";
+                                continue;
+                            }
+
+                            // std::cout << "[INFO] CLIENT_ACK packet received\n";
+                            // check if session exists, etc.
+                            SessionState *session = client_connection_sessions.getSession(client_addr);
+                            if (session == nullptr)
+                            {
+                                std::cout << "[WARN] CLIENT_ACK from unknown client\n";
+                                continue;
+                            }
+                            uint32_t shared_secret = modexp(session->yc, session->b, P);
+                            uint8_t xor_key = calculateXORKey(shared_secret);
+
+                            // std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
+                            // Add client to ClientManager
+                            cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
+                            // Delete session state as handshake is complete
+                            client_connection_sessions.eraseSession(client_addr);
                         }
 
-                        uint32_t assigned_ip = nextAvailableIp;
-
-                        WelcomePacket welcome{};
-                        welcome.hdr.type = PKT_WELCOME;
-                        welcome.hdr.session_id = hello->client_magic; // unused for now
-                        welcome.assigned_tun_ip = htonl(assigned_ip);
-                        long long random_b = randomNumGen(1000, 5000);
-                        welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
-                        // Create SessionState for this client
-                        client_connection_sessions.addSession(
-                            client_addr,
-                            hello->client_magic,
-                            assigned_ip,
-                            ntohl(hello->yc),
-                            random_b);
-
-                        sendto(sock,
-                               (char *)&welcome,
-                               sizeof(welcome),
-                               0,
-                               (struct sockaddr *)&client_addr,
-                               sizeof(client_addr));
-                        in_addr a{};
-                        a.s_addr = htonl(assigned_ip);
-                        std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
-                                  << inet_ntoa(a) << "\n";
-                    }
-                    else if (hdr->type == PKT_CLIENT_ACK)
-                    {
-                        if (n < (int)sizeof(ClientAckPacket))
+                        else
                         {
-                            std::cout << "[WARN] Short ClientAckPacket packet\n";
+
+                            std::cout << "[INFO] Non-DATA packet received, type="
+                                      << int(hdr->type) << " (ignored for now)\n";
                             continue;
                         }
-
-                        // std::cout << "[INFO] CLIENT_ACK packet received\n";
-                        // check if session exists, etc.
-                        SessionState *session = client_connection_sessions.getSession(client_addr);
-                        if (session == nullptr)
-                        {
-                            std::cout << "[WARN] CLIENT_ACK from unknown client\n";
-                            continue;
-                        }
-                        uint32_t shared_secret = modexp(session->yc, session->b, P);
-                        uint8_t xor_key = calculateXORKey(shared_secret);
-
-                        // std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
-                        // Add client to ClientManager
-                        cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
-                        // Delete session state as handshake is complete
-                        client_connection_sessions.eraseSession(client_addr);
-                    }
-
-                    else
-                    {
-
-                        std::cout << "[INFO] Non-DATA packet received, type="
-                                  << int(hdr->type) << " (ignored for now)\n";
-                        continue;
                     }
                 }
+
                 else
                 {
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
@@ -255,13 +284,16 @@ int main()
                     perror("recvfrom");
                     break;
                 }
+                // If kernel returned fewer than batch, socket is drained
+                if (rcvd < RX_BATCH)
+                    break;
             }
         }
         if (FD_ISSET(tun, &rf))
         {
             while (true)
             {
-                int n = read(tun, buf, sizeof(buf));
+                int n = read(tun, main_loop_buf, sizeof(main_loop_buf));
                 if (n < 0)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -271,7 +303,7 @@ int main()
                 }
                 if (n > 0)
                 {
-                    handleTunToUdp(cm, enc, sock, buf, n);
+                    handleTunToUdp(cm, enc, sock, main_loop_buf, n);
                 }
             }
         }

@@ -17,6 +17,8 @@ add_executable(vpn_server
     crypto/KeyDerivation.cpp
 
     protocol/Handshake.cpp
+
+    utils/counter_definition.cpp
 )
 
 target_include_directories(vpn_server PRIVATE

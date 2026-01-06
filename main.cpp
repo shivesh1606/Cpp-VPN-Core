@@ -17,7 +17,7 @@
 #include "net/socket/SocketManager.h"
 #include <sys/uio.h>
 #include <sys/time.h>
-
+#include "utils/counter_definition.h"
 constexpr int RX_BATCH = 8;
 constexpr int RX_BUF_SIZE = 2000;
 constexpr int TX_BATCH = 8;
@@ -37,12 +37,12 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     if (!client)
     {
         std::cout << "[WARN] DATA packet from unknown client\n";
+        global_stats.udp_rx_drops++;
         return;
     }
     // Encrypted payload starts AFTER header
     int enc_len = n - sizeof(PacketHeader);
     char *enc_payload = (char *)(buf + sizeof(PacketHeader));
-
     // Decrypt payload
     enc.crypt(enc_payload, enc_len, temp, client->xor_key);
 
@@ -53,14 +53,16 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
         return;
     }
     ssize_t write_count = write(tun, temp, enc_len);
+
     if (write_count < 0)
     {
         perror("write tun");
         std::cout << "[ERROR] Failed to write to TUN\n";
+        global_stats.tun_rx_drops++;
         return;
     }
-
-    // std::cout << "[UDP→TUN] Wrote " << enc_len << " bytes to TUN\n";
+    global_stats.tun_tx_pkts++;
+    global_stats.tun_tx_bytes += write_count;
 }
 
 void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
@@ -122,6 +124,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         if (n < (int)sizeof(ClientAckPacket))
         {
             std::cout << "[WARN] Short ClientAckPacket packet\n";
+            global_stats.handshake_failures++;
             return;
         }
 
@@ -131,6 +134,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         if (session == nullptr)
         {
             std::cout << "[WARN] CLIENT_ACK from unknown client\n";
+            global_stats.handshake_failures++;
             return;
         }
         uint32_t shared_secret = modexp(session->yc, session->b, P);
@@ -148,16 +152,16 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
 
         std::cout << "[INFO] Non-DATA packet received, type="
                   << int(hdr->type) << " (ignored for now)\n";
+        global_stats.handshake_failures++;
         return;
     }
 }
 int main()
 {
-    std::cout.setf(std::ios::unitbuf); // <-- flush after every output
+    // std::cout.setf(std::ios::unitbuf); // <-- flush after every output
     ClientSession client_connection_sessions;
     ClientManager cm(100, "10.8.0.2");
     int tun = TunDevice::create("tun0");
-    // Example usage in your TUN/UDP loop
     XorCipher &enc = XorCipher::getInstance();
     int sock = SocketManager::createUdpSocket(5555);
     if (sock < 0)
@@ -166,10 +170,6 @@ int main()
         return 1;
     }
     unsigned char main_loop_buf[2000];
-    // char temp[2000];
-    // struct sockaddr_in client_addr{};
-    // socklen_t client_len = sizeof(client_addr);
-    // Client *client, *target;
     const int HANDSHAKE_TIMEOUT = 10; // seconds
     fcntl(sock, F_SETFL, O_NONBLOCK);
     fcntl(tun, F_SETFL, O_NONBLOCK);
@@ -207,11 +207,23 @@ int main()
         tx_msgs[i].msg_hdr.msg_iovlen = 1;
     }
 
+    static time_t last = time(nullptr);
     while (true)
     {
 
         // Periodically erase expired sessions
-        client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT);
+        time_t now = time(nullptr);
+
+        if (now != last)
+        {
+            last = now;
+
+            global_stats.print_Stats();
+            global_stats.reset_Stats();
+
+            client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT);
+        }
+
         fd_set rf;
         FD_ZERO(&rf);
         FD_SET(sock, &rf);
@@ -234,19 +246,17 @@ int main()
 
                 if (rcvd > 0)
                 {
+                    global_stats.udp_rx_batches++;
                     for (int i = 0; i < rcvd; i++)
                     {
 
                         int n = rx_msgs[i].msg_len;
+                        global_stats.udp_rx_pkts++;
                         unsigned char *buf = rx_bufs[i];
                         struct sockaddr_in &client_addr = rx_addrs[i];
-                        // inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-                        // std::cout << "[IN] Received " << n << " bytes from " << client_ip
-                        //           << ":" << ntohs(client_addr.sin_port) << "\n";
-                        // std::cout << "[UDP→TUN] " << n << " bytes\n";
-                        // Decrypt data after receiving UDP
                         if (n < (int)sizeof(PacketHeader))
                         {
+                            global_stats.udp_rx_drops++;
                             std::cout << "[WARN] Packet too small for header\n";
                             continue;
                         }
@@ -255,16 +265,19 @@ int main()
                         if (hdr->type == PKT_DATA)
                         {
                             handleUdpToTun(cm, enc, tun, buf, n, client_addr);
+                            global_stats.udp_rx_bytes += n;
                         }
                         else
                         {
                             handleHandshake(hdr, n, buf, client_addr, sock,
                                             client_connection_sessions, cm);
+                            global_stats.handshake_pkts++;
                         }
                     }
                 }
                 else
                 {
+                    global_stats.udp_recv_eagain++;
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         break; // No more data to read
@@ -287,6 +300,7 @@ int main()
                 int n = read(tun, main_loop_buf, sizeof(main_loop_buf));
                 if (n < 0)
                 {
+                    global_stats.tun_read_eagain++;
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
                         break;
                     perror("read tun");
@@ -295,6 +309,8 @@ int main()
 
                 if (n == 0)
                     break;
+                global_stats.tun_rx_pkts++;
+                global_stats.tun_rx_bytes += n;
 
                 // ---- ORIGINAL LOGIC, INLINE ----
                 in_addr dst_a;
@@ -329,8 +345,10 @@ int main()
                 if (batch_count == TX_BATCH)
                 {
                     int sent = sendmmsg(sock, tx_msgs, batch_count, 0);
+                    global_stats.udp_tx_batches++;
                     if (sent < 0)
                     {
+                        global_stats.udp_tx_drops += (batch_count);
                         perror("sendmmsg");
                         batch_count = 0;
                     }
@@ -340,10 +358,16 @@ int main()
                         // Optional debug log:
                         std::cout << "[WARN] sendmmsg dropped "
                                   << (batch_count - sent) << " packets\n";
+                        global_stats.udp_tx_drops += (batch_count - sent);
                         batch_count = 0;
                     }
                     else
                     {
+                        global_stats.udp_tx_pkts += sent;
+                        for (int i = 0; i < sent; i++)
+                        {
+                            global_stats.udp_tx_bytes += tx_iovecs[i].iov_len;
+                        }
                         batch_count = 0;
                     }
                 }
@@ -351,9 +375,11 @@ int main()
             if (batch_count > 0)
             {
                 int sent = sendmmsg(sock, tx_msgs, batch_count, 0);
+                global_stats.udp_tx_batches++;
                 if (sent < 0)
                 {
                     perror("sendmmsg");
+                    global_stats.udp_tx_drops += (batch_count);
                     batch_count = 0;
                 }
                 else if (sent < batch_count)
@@ -362,10 +388,16 @@ int main()
                     // Optional debug log:
                     std::cout << "[WARN] sendmmsg dropped "
                               << (batch_count - sent) << " packets\n";
+                    global_stats.udp_tx_drops += (batch_count - sent);
                     batch_count = 0;
                 }
                 else
                 {
+                    global_stats.udp_tx_pkts += sent;
+                    for (int i = 0; i < sent; i++)
+                    {
+                        global_stats.udp_tx_bytes += tx_iovecs[i].iov_len;
+                    }
                     batch_count = 0;
                 }
             }

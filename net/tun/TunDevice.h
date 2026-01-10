@@ -2,6 +2,7 @@
 #define TUNDEVICE_H
 
 #include <iostream>
+#include "utils/logger.h"
 
 class TunDevice {
 public:
@@ -9,10 +10,10 @@ public:
     static int create(const char* name = "tun0");
     // Constructor and Destructor with basic logging
     TunDevice(){
-        std::cout << "[+] TunDevice instance created\n";
+        LOG(LOG_INFO, "[+] TunDevice instance created\n");
     }
     ~TunDevice(){
-        std::cout << "[-] TunDevice instance destroyed\n";
+        LOG(LOG_INFO, "[+] TunDevice instance destroyed\n");
     }
 };
 

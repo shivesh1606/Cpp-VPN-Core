@@ -1,6 +1,7 @@
 #include "Client_Manager.h"
 #include <string>
 #include <iostream>
+#include "utils/logger.h"
 
 ClientManager::ClientManager(int poolSize, const char* startIp) {
     // Initialize pool of available IPs
@@ -8,12 +9,11 @@ ClientManager::ClientManager(int poolSize, const char* startIp) {
 
     // Convert base IP string -> uint32 host order
     baseIp = ntohl(inet_addr(startIp));
-    std::cout << "[+] ClientManager initialized with IP pool starting at "
-              << startIp << " (" << (baseIp) << ") of size " << poolSize << "\n";
+    LOG(LOG_INFO, "[+] ClientManager created with IP pool starting at %s", startIp);
 }
 
 ClientManager::~ClientManager() {
-    std::cout << "[-] ClientManager destroyed\n";
+    LOG(LOG_INFO, "[+] ClientManager destroyed, cleaning up %zu clients", vpn_to_client.size());
 }
 
 Client* ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,uint8_t &xor_key) {
@@ -105,12 +105,12 @@ uint32_t ClientManager::getNextAvailableIp(){
 void ClientManager::freeIp(uint32_t ip) {
     uint32_t index = ip - baseIp;
     if (index >= ipPool.size()) {
-        std::cout << "[WARN] freeIp: invalid IP\n";
+        LOG(LOG_WARN, "[WARN] Attempt to free out-of-bounds IP");
         return;
     }
 
     if (ipPool[index] == 0) {
-        std::cout << "[WARN] Double free detected for IP\n";
+        LOG(LOG_WARN, "[WARN] Attempt to free an IP that is already free");
         return;
     }
 

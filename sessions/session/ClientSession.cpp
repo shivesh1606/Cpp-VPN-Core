@@ -1,13 +1,13 @@
 #include "ClientSession.h"
 #include <algorithm>
 #include <iostream>
-
+#include "utils/logger.h"
 ClientSession::ClientSession() {
-    std::cout << "[INFO] ClientSession initialized\n";
+    LOG(LOG_INFO, "[+] ClientSession created\n");
 }
 
 ClientSession::~ClientSession() {
-    std::cout << "[INFO] ClientSession destroyed\n";
+    LOG(LOG_INFO, "[+] ClientSession destroyed\n");
 }
 
 void ClientSession::addSession(const sockaddr_in& addr,

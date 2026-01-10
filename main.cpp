@@ -18,6 +18,17 @@
 #include <sys/uio.h>
 #include <sys/time.h>
 #include "utils/counter_definition.h"
+#include "utils/logger.h"
+#include <signal.h>
+
+static volatile sig_atomic_t g_shutdown = 0;
+
+void handle_sigint(int)
+{
+    std::cout << "[INFO] Caught termination signal, shutting down...\n";
+    g_shutdown = 1;
+}
+
 constexpr int RX_BATCH = 8;
 constexpr int RX_BUF_SIZE = 2000;
 constexpr int TX_BATCH = 8;
@@ -31,12 +42,11 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     // Placeholder for UDP to TUN handling logic
     static char temp[2000];
     Client *client;
-    // std::cout << "[INFO] DATA packet received\n";
     client = cm.getClientByUdp(client_addr);
 
     if (!client)
     {
-        std::cout << "[WARN] DATA packet from unknown client\n";
+        LOG(LOG_WARN, "DATA packet from unknown client");
         global_stats.udp_rx_drops++;
         return;
     }
@@ -49,7 +59,7 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
     if (enc_len < 20)
     {
-        std::cout << "[WARN] decrypted packet too small (" << enc_len << " bytes) - skipping\n";
+        LOG(LOG_WARN, "Decrypted packet too small (%d bytes) - skipping", enc_len);
         return;
     }
     ssize_t write_count = write(tun, temp, enc_len);
@@ -57,7 +67,7 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     if (write_count < 0)
     {
         perror("write tun");
-        std::cout << "[ERROR] Failed to write to TUN\n";
+        LOG(LOG_ERROR, "Failed to write to TUN");
         global_stats.tun_rx_drops++;
         return;
     }
@@ -76,19 +86,17 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
     {
         if (n < (int)sizeof(HelloPacket))
         {
-            std::cout << "[WARN] Short HELLO packet\n";
+            LOG(LOG_WARN, "Short HelloPacket packet");
             return;
         }
 
         HelloPacket *hello = (HelloPacket *)buf;
         //
-        // std::cout << "[INFO] HELLO packet received, client_magic="
-        //           << hello->client_magic << "\n";
 
         uint32_t nextAvailableIp = cm.getNextAvailableIp();
         if (nextAvailableIp == 0)
         {
-            std::cout << "[ERROR] No available VPN IPs to assign\n";
+            LOG(LOG_ERROR, "No available IPs to assign to new client");
             return;
         }
 
@@ -116,31 +124,31 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
                sizeof(client_addr));
         in_addr a{};
         a.s_addr = htonl(assigned_ip);
-        std::cout << "[INFO] Sent WELCOME packet, assigned_ip="
-                  << inet_ntoa(a) << "\n";
+        LOG(LOG_INFO, "Sent WELCOME to %s, assigned IP %s",
+            inet_ntoa(client_addr.sin_addr),
+            inet_ntoa(a));
     }
     else if (hdr->type == PKT_CLIENT_ACK)
     {
         if (n < (int)sizeof(ClientAckPacket))
         {
-            std::cout << "[WARN] Short ClientAckPacket packet\n";
+            LOG(LOG_WARN, "Short ClientAckPacket packet");
             global_stats.handshake_failures++;
             return;
         }
 
-        // std::cout << "[INFO] CLIENT_ACK packet received\n";
         // check if session exists, etc.
         SessionState *session = client_connection_sessions.getSession(client_addr);
         if (session == nullptr)
         {
-            std::cout << "[WARN] CLIENT_ACK from unknown client\n";
+            LOG(LOG_WARN, "No session found for Client ACK from %s",
+                inet_ntoa(client_addr.sin_addr));
             global_stats.handshake_failures++;
             return;
         }
         uint32_t shared_secret = modexp(session->yc, session->b, P);
         uint8_t xor_key = calculateXORKey(shared_secret);
 
-        // std::cout << "[INFO] Calculated XOR key: " << unsigned(xor_key);
         // Add client to ClientManager
         cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
         // Delete session state as handshake is complete
@@ -149,16 +157,22 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
 
     else
     {
-
-        std::cout << "[INFO] Non-DATA packet received, type="
-                  << int(hdr->type) << " (ignored for now)\n";
+        LOG(LOG_WARN, "Unknown handshake packet type: %d", hdr->type);
         global_stats.handshake_failures++;
         return;
     }
 }
 int main()
 {
-    // std::cout.setf(std::ios::unitbuf); // <-- flush after every output
+    log_init();
+
+    struct sigaction sa{};
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // IMPORTANT: no SA_RESTART
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
     ClientSession client_connection_sessions;
     ClientManager cm(100, "10.8.0.2");
     int tun = TunDevice::create("tun0");
@@ -174,7 +188,7 @@ int main()
     fcntl(sock, F_SETFL, O_NONBLOCK);
     fcntl(tun, F_SETFL, O_NONBLOCK);
 
-    std::cout << "Sock fd is " << sock << " and tun fd is " << tun << "\n";
+    LOG(LOG_INFO, "Server started, socket fd %d, TUN fd %d", sock, tun);
 
     // Per-batch storage (stack-owned, safe)
     struct mmsghdr rx_msgs[RX_BATCH];
@@ -208,7 +222,7 @@ int main()
     }
 
     static time_t last = time(nullptr);
-    while (true)
+    while (!g_shutdown)
     {
 
         // Periodically erase expired sessions
@@ -257,7 +271,8 @@ int main()
                         if (n < (int)sizeof(PacketHeader))
                         {
                             global_stats.udp_rx_drops++;
-                            std::cout << "[WARN] Packet too small for header\n";
+                            LOG(LOG_WARN, "Received too short packet (%d bytes) from %s",
+                                n, inet_ntoa(client_addr.sin_addr));
                             continue;
                         }
 
@@ -356,8 +371,8 @@ int main()
                     {
                         // Drop remaining packets intentionally (UDP)
                         // Optional debug log:
-                        std::cout << "[WARN] sendmmsg dropped "
-                                  << (batch_count - sent) << " packets\n";
+                        LOG(LOG_WARN, "sendmmsg dropped %d packets",
+                            (batch_count - sent));
                         global_stats.udp_tx_drops += (batch_count - sent);
                         batch_count = 0;
                     }
@@ -386,8 +401,8 @@ int main()
                 {
                     // Drop remaining packets intentionally (UDP)
                     // Optional debug log:
-                    std::cout << "[WARN] sendmmsg dropped "
-                              << (batch_count - sent) << " packets\n";
+                    LOG(LOG_WARN, "sendmmsg dropped %d packets",
+                        (batch_count - sent));
                     global_stats.udp_tx_drops += (batch_count - sent);
                     batch_count = 0;
                 }
@@ -403,6 +418,10 @@ int main()
             }
         }
     }
+    LOG(LOG_INFO, "Shutting down");
+
+    log_flush();
+    log_shutdown();
 
     close(tun);
     close(sock);

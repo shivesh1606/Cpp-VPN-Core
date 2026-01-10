@@ -24,6 +24,6 @@ int TunDevice::create(const char* name)
         throw std::runtime_error("ioctl(TUNSETIFF) failed");
     }
 
-    std::cout << "[+] TUN created: " << ifr.ifr_name << "\n";
+    LOG(LOG_INFO, "TUN device %s created with fd %d", ifr.ifr_name, fd);
     return fd;
 }

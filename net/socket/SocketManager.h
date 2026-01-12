@@ -4,14 +4,14 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <iostream>
-
+#include "utils/logger.h"
 class SocketManager {
 public:
     SocketManager(){
-        std::cout << "[+] SocketManager instance created\n";
+        LOG(LOG_INFO, "[+] SocketManager instance created\n");
     }
     ~SocketManager(){
-        std::cout << "[-] SocketManager instance destroyed\n";
+        LOG(LOG_INFO, "[+] SocketManager instance destroyed\n");
     }
     static int createUdpSocket(uint16_t port) ;
 };

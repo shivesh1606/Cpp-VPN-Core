@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <ctime>
+#include "utils/logger.h"
 #include <cfloat>
 
 struct Stats
@@ -109,43 +110,27 @@ struct Stats
                 std::max(max_avg_pkts_per_tx_batch, avg_pkts_per_tx_batch);
         }
 
-        std::cout
-            << "\n===== VPN STATS =====\n"
-            << "UDP RX: pkts=" << udp_rx_pkts
-            << " bytes=" << udp_rx_bytes
-            << " batches=" << udp_rx_batches << "\n"
+        LOG(LOG_INFO,
+            "---- Stats (last %ld sec) ----\n"
+            "UDP RX: %lu pkts, %lu bytes, %lu Mbps (max: %lu, min: %lu)\n"
+            "TUN TX: %lu pkts, %lu bytes, %lu Mbps (max: %lu, min: %lu)\n"
+            "Handshake pkts: %lu, failures: %lu\n"
+            "Drops - TUN RX: %lu, UDP TX: %lu, UDP RX: %lu\n"
+            "EAGAIN - TUN read: %lu, UDP recv: %lu\n"
+            "UDP RX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n"
+            "UDP TX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n",
+            delta,
+            udp_rx_pkts, udp_rx_bytes, udp_mbps, max_udp_mbps,
+            (min_udp_mbps == UINT64_MAX ? 0 : min_udp_mbps),
+            tun_tx_pkts, tun_tx_bytes, tun_mbps, max_tun_mbps,
+            (min_tun_mbps == UINT64_MAX ? 0 : min_tun_mbps),
+            handshake_pkts, handshake_failures,
+            tun_rx_drops, udp_tx_drops, udp_rx_drops,
+            tun_read_eagain, udp_recv_eagain,
+            udp_rx_batches, avg_pkts_per_rx_batch, max_avg_pkts_per_rx_batch,
+            udp_tx_batches, avg_pkts_per_tx_batch, max_avg_pkts_per_tx_batch);
 
-            << "UDP TX: pkts=" << udp_tx_pkts
-            << " bytes=" << udp_tx_bytes
-            << " batches=" << udp_tx_batches << "\n"
-
-            << "TUN RX: pkts=" << tun_rx_pkts
-            << " bytes=" << tun_rx_bytes << "\n"
-
-            << "TUN TX: pkts=" << tun_tx_pkts
-            << " bytes=" << tun_tx_bytes << "\n"
-
-            << "Drops: tun_rx=" << tun_rx_drops
-            << " udp_rx=" << udp_rx_drops
-            << " udp_tx=" << udp_tx_drops << "\n"
-
-            << "EAGAIN: tun=" << tun_read_eagain
-            << " udp=" << udp_recv_eagain << "\n"
-
-            << "Avg RX pkts/batch=" << avg_pkts_per_rx_batch
-            << " (max=" << max_avg_pkts_per_rx_batch << ")\n"
-
-            << "Avg TX pkts/batch=" << avg_pkts_per_tx_batch
-            << " (max=" << max_avg_pkts_per_tx_batch << ")\n"
-
-            << "UDP Mbps=" << udp_mbps
-            << " (max=" << max_udp_mbps
-            << " min=" << min_udp_mbps << ")\n"
-
-            << "TUN Mbps=" << tun_mbps
-            << " (max=" << max_tun_mbps
-            << " min=" << min_tun_mbps << ")\n"
-            << "=====================\n";
+        log_flush();
     }
 };
 

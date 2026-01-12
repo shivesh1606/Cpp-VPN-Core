@@ -1,4 +1,5 @@
 #include "SocketManager.h"
+#include "utils/logger.h"
 
 int SocketManager::createUdpSocket(uint16_t port) 
 {
@@ -21,6 +22,7 @@ int SocketManager::createUdpSocket(uint16_t port)
         return -1;
     }
 
-    std::cout << "[+] UDP listening on port " << port << "\n";
+    LOG(LOG_INFO, "UDP socket created and bound to port %d", port);
+
     return sock;
 }

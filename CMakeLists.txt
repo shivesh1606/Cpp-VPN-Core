@@ -19,6 +19,7 @@ add_executable(vpn_server
     protocol/Handshake.cpp
 
     utils/counter_definition.cpp
+    utils/logger.cpp
 )
 
 target_include_directories(vpn_server PRIVATE

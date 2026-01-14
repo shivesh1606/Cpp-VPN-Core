@@ -14,12 +14,13 @@ void ClientSession::addSession(const sockaddr_in& addr,
                                uint32_t client_magic,
                                uint32_t assigned_tun_ip,
                                uint32_t yc,
-                               uint32_t b) {
+                               uint32_t b,uint32_t session_id) {
     SessionState s{};
     s.client_udp_addr = addr;
     s.client_magic = client_magic;
     s.assigned_tun_ip = assigned_tun_ip;
     s.created_at = time(nullptr);
+    s.session_id = session_id;
     s.yc = yc;
     s.b = b;
     sessions_.push_back(s);

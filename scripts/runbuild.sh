@@ -3,5 +3,5 @@ cd ~/cppVpn/DUMP
 rm -rf build
 mkdir build
 cd build
-cmake -DENABLE_PROFILING=ON ..
+cmake -DENABLE_PROFILING=OFF ..
 make -j

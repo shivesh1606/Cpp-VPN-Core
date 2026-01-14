@@ -127,11 +127,19 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
                0,
                (struct sockaddr *)&client_addr,
                sizeof(client_addr));
-        in_addr a{};
-        a.s_addr = htonl(assigned_ip);
-        LOG(LOG_INFO, "Sent WELCOME to %s, assigned IP %s",
-            inet_ntoa(client_addr.sin_addr),
-            inet_ntoa(a));
+        char client_ip_str[INET_ADDRSTRLEN];
+        char assigned_ip_str[INET_ADDRSTRLEN];
+
+        // Use inet_ntop to avoid the static buffer overlap bug of inet_ntoa
+        struct in_addr net_addr;
+        net_addr.s_addr = welcome.assigned_tun_ip;
+
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &net_addr, assigned_ip_str, INET_ADDRSTRLEN);
+
+        LOG(LOG_INFO, "Handshake: Client %s -> Assigned Virtual IP %s",
+            client_ip_str,
+            assigned_ip_str);
     }
     else if (hdr->type == PKT_CLIENT_ACK)
     {

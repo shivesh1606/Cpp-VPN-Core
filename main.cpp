@@ -20,14 +20,9 @@
 #include "utils/counter_definition.h"
 #include "utils/logger.h"
 #include <signal.h>
+#include "utils/profiling.h"
 
 static volatile sig_atomic_t g_shutdown = 0;
-static inline uint64_t rdtsc()
-{
-    unsigned hi, lo;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
 
 void handle_sigint(int)
 {
@@ -48,12 +43,9 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     // Placeholder for UDP to TUN handling logic
     static char temp[2000];
     Client *client;
-    uint64_t start = rdtsc();
+    PROFILE_SCOPE_START(lookup_t0);
     client = cm.getClientByUdp(client_addr);
-    uint64_t end = rdtsc();
-
-    global_stats.lookup_cycles += (end - start);
-
+    PROFILE_SCOPE_END(lookup_t0, global_stats.lookup_cycles);
     if (!client)
     {
         LOG(LOG_WARN, "DATA packet from unknown client");
@@ -64,28 +56,28 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     int enc_len = n - sizeof(PacketHeader);
     char *enc_payload = (char *)(buf + sizeof(PacketHeader));
     // Decrypt payload
-    uint64_t start = rdtsc();
+    PROFILE_SCOPE_START(dec_t0);
     enc.crypt(enc_payload, enc_len, temp, client->xor_key);
-    uint64_t end = rdtsc();
-
-    global_stats.dec_cycles += (end - start);
+    PROFILE_SCOPE_END(dec_t0, global_stats.dec_cycles);
     // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
     if (enc_len < 20)
     {
         LOG(LOG_WARN, "Decrypted packet too small (%d bytes) - skipping", enc_len);
         return;
     }
+    PROFILE_SCOPE_START(tun_wr_t0);
     ssize_t write_count = write(tun, temp, enc_len);
+    PROFILE_SCOPE_END(tun_wr_t0, global_stats.tun_write_cycles);
 
     if (write_count < 0)
     {
         perror("write tun");
         LOG(LOG_ERROR, "Failed to write to TUN");
-        global_stats.tun_rx_drops++;
+        STAT_ADD(global_stats.tun_rx_drops, 1);
         return;
     }
-    global_stats.tun_tx_pkts++;
-    global_stats.tun_tx_bytes += write_count;
+    STAT_ADD(global_stats.tun_tx_pkts, 1);
+    STAT_ADD(global_stats.tun_tx_bytes, write_count);
 }
 
 void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
@@ -146,7 +138,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         if (n < (int)sizeof(ClientAckPacket))
         {
             LOG(LOG_WARN, "Short ClientAckPacket packet");
-            global_stats.handshake_failures++;
+            STAT_ADD(global_stats.handshake_failures, 1);
             return;
         }
 
@@ -156,7 +148,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         {
             LOG(LOG_WARN, "No session found for Client ACK from %s",
                 inet_ntoa(client_addr.sin_addr));
-            global_stats.handshake_failures++;
+            STAT_ADD(global_stats.handshake_failures, 1);
             return;
         }
         uint32_t shared_secret = modexp(session->yc, session->b, P);
@@ -171,7 +163,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
     else
     {
         LOG(LOG_WARN, "Unknown handshake packet type: %d", hdr->type);
-        global_stats.handshake_failures++;
+        STAT_ADD(global_stats.handshake_failures, 1);
         return;
     }
 }
@@ -269,23 +261,25 @@ int main()
 
             while (true)
             {
-                uint64_t batch_start = rdtsc();
+
+                PROFILE_SCOPE_START(rx_syscall_t0);
                 int rcvd = recvmmsg(sock, rx_msgs, RX_BATCH, 0, nullptr);
-                uint64_t batch_end = rdtsc();
-                global_stats.rx_batch_cycles += (batch_end - batch_start);
+                PROFILE_SCOPE_END(rx_syscall_t0, global_stats.rx_syscall_cycles);
+
                 if (rcvd > 0)
                 {
-                    global_stats.udp_rx_batches++;
+                    STAT_ADD(global_stats.udp_rx_batches, 1);
+                    PROFILE_SCOPE_START(rx_batch_t0);
                     for (int i = 0; i < rcvd; i++)
                     {
 
                         int n = rx_msgs[i].msg_len;
-                        global_stats.udp_rx_pkts++;
+                        STAT_ADD(global_stats.udp_rx_pkts, 1);
                         unsigned char *buf = rx_bufs[i];
                         struct sockaddr_in &client_addr = rx_addrs[i];
                         if (n < (int)sizeof(PacketHeader))
                         {
-                            global_stats.udp_rx_drops++;
+                            STAT_ADD(global_stats.udp_rx_drops, 1);
                             LOG(LOG_WARN, "Received too short packet (%d bytes) from %s",
                                 n, inet_ntoa(client_addr.sin_addr));
                             continue;
@@ -295,19 +289,20 @@ int main()
                         if (hdr->type == PKT_DATA)
                         {
                             handleUdpToTun(cm, enc, tun, buf, n, client_addr);
-                            global_stats.udp_rx_bytes += n;
+                            STAT_ADD(global_stats.udp_rx_bytes, n);
                         }
                         else
                         {
                             handleHandshake(hdr, n, buf, client_addr, sock,
                                             client_connection_sessions, cm);
-                            global_stats.handshake_pkts++;
+                            STAT_ADD(global_stats.handshake_pkts, 1);
                         }
                     }
+                    PROFILE_SCOPE_END(rx_batch_t0, global_stats.rx_userspace_cycles);
                 }
                 else
                 {
-                    global_stats.udp_recv_eagain++;
+                    STAT_ADD(global_stats.udp_recv_eagain, 1);
                     if (errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         break; // No more data to read
@@ -327,10 +322,12 @@ int main()
 
             while (true)
             {
+                PROFILE_SCOPE_START(tun_rd_t0);
                 int n = read(tun, main_loop_buf, sizeof(main_loop_buf));
+                PROFILE_SCOPE_END(tun_rd_t0, global_stats.tun_read_cycles);
                 if (n < 0)
                 {
-                    global_stats.tun_read_eagain++;
+                    STAT_ADD(global_stats.tun_read_eagain, 1);
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
                         break;
                     perror("read tun");
@@ -339,8 +336,8 @@ int main()
 
                 if (n == 0)
                     break;
-                global_stats.tun_rx_pkts++;
-                global_stats.tun_rx_bytes += n;
+                STAT_ADD(global_stats.tun_rx_pkts, 1);
+                STAT_ADD(global_stats.tun_rx_bytes, n);
 
                 // ---- ORIGINAL LOGIC, INLINE ----
                 in_addr dst_a;
@@ -357,11 +354,9 @@ int main()
 
                 unsigned char *out = tx_bufs[batch_count];
                 memcpy(out, &hdr, sizeof(hdr));
-                uint64_t start = rdtsc();
+                PROFILE_SCOPE_START(enc_t0);
                 enc.crypt((char *)main_loop_buf, n, (char *)out + sizeof(hdr), target->xor_key);
-                uint64_t end = rdtsc();
-
-                global_stats.enc_cycles += (end - start);
+                PROFILE_SCOPE_END(enc_t0, global_stats.enc_cycles);
                 tx_iovecs[batch_count].iov_base = out;
                 tx_iovecs[batch_count].iov_len = sizeof(hdr) + n;
 
@@ -377,11 +372,15 @@ int main()
                 // ---- FLUSH CONDITIONS ----
                 if (batch_count == TX_BATCH)
                 {
+
+                    PROFILE_SCOPE_START(tx_syscall_t0);
                     int sent = sendmmsg(sock, tx_msgs, batch_count, 0);
-                    global_stats.udp_tx_batches++;
+
+                    PROFILE_SCOPE_END(tx_syscall_t0, global_stats.tx_syscall_cycles);
+                    STAT_ADD(global_stats.udp_tx_batches, 1);
                     if (sent < 0)
                     {
-                        global_stats.udp_tx_drops += (batch_count);
+                        STAT_ADD(global_stats.udp_tx_drops, (batch_count));
                         perror("sendmmsg");
                         batch_count = 0;
                     }
@@ -391,15 +390,15 @@ int main()
                         // Optional debug log:
                         LOG(LOG_WARN, "sendmmsg dropped %d packets",
                             (batch_count - sent));
-                        global_stats.udp_tx_drops += (batch_count - sent);
+                        STAT_ADD(global_stats.udp_tx_drops, (batch_count - sent));
                         batch_count = 0;
                     }
                     else
                     {
-                        global_stats.udp_tx_pkts += sent;
+                        STAT_ADD(global_stats.udp_tx_pkts, sent);
                         for (int i = 0; i < sent; i++)
                         {
-                            global_stats.udp_tx_bytes += tx_iovecs[i].iov_len;
+                            STAT_ADD(global_stats.udp_tx_bytes, tx_iovecs[i].iov_len);
                         }
                         batch_count = 0;
                     }
@@ -407,12 +406,15 @@ int main()
             }
             if (batch_count > 0)
             {
+                PROFILE_SCOPE_START(tx_syscall_t0);
                 int sent = sendmmsg(sock, tx_msgs, batch_count, 0);
-                global_stats.udp_tx_batches++;
+
+                PROFILE_SCOPE_END(tx_syscall_t0, global_stats.tx_syscall_cycles);
+                STAT_ADD(global_stats.udp_tx_batches, 1);
                 if (sent < 0)
                 {
                     perror("sendmmsg");
-                    global_stats.udp_tx_drops += (batch_count);
+                    STAT_ADD(global_stats.udp_tx_drops, (batch_count));
                     batch_count = 0;
                 }
                 else if (sent < batch_count)
@@ -421,15 +423,15 @@ int main()
                     // Optional debug log:
                     LOG(LOG_WARN, "sendmmsg dropped %d packets",
                         (batch_count - sent));
-                    global_stats.udp_tx_drops += (batch_count - sent);
+                    STAT_ADD(global_stats.udp_tx_drops, (batch_count - sent));
                     batch_count = 0;
                 }
                 else
                 {
-                    global_stats.udp_tx_pkts += sent;
+                    STAT_ADD(global_stats.udp_tx_pkts, sent);
                     for (int i = 0; i < sent; i++)
                     {
-                        global_stats.udp_tx_bytes += tx_iovecs[i].iov_len;
+                        STAT_ADD(global_stats.udp_tx_bytes, tx_iovecs[i].iov_len);
                     }
                     batch_count = 0;
                 }

@@ -8,13 +8,14 @@
 #include <ctime>
 #include <sys/types.h>
 #include <cstdlib>
+#include "version.h" // <--- Include the generated file
 
 static int g_log_fd = -1;
 
 /* Tunables */
 static constexpr size_t LOG_BUF_SIZE = 64 * 1024;
 
-static char   g_buf[LOG_BUF_SIZE];
+static char g_buf[LOG_BUF_SIZE];
 static size_t g_pos = 0;
 
 /* ---------- internals ---------- */
@@ -56,15 +57,23 @@ void log_init()
     const char* env = getenv("VPN_LOG_FILE");
     if (env && *env) {
         log_init_file(env);
-        return;
+    } else {
+        int flags = fcntl(STDERR_FILENO, F_GETFL, 0);
+        if (flags >= 0)
+            fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK);
+
+        g_log_fd = STDERR_FILENO;
     }
 
-    int flags = fcntl(STDERR_FILENO, F_GETFL, 0);
-    if (flags >= 0)
-        fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK);
-
-    g_log_fd = STDERR_FILENO;
+    // 🔥 ALWAYS PRINT VERSION
+    LOG(LOG_INFO, "=== VPN Server Started ===");
+    LOG(LOG_INFO, "Version: %d.%d (Build %d)",
+        PROJECT_VERSION_MAJOR,
+        PROJECT_VERSION_MINOR,
+        PROJECT_BUILD_NUMBER);
+    LOG(LOG_INFO, "Logger initialized at time %ld", time(nullptr));
 }
+
 
 void log_shutdown()
 {

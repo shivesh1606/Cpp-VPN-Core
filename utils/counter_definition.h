@@ -42,7 +42,11 @@ struct Stats
 
     double max_avg_pkts_per_rx_batch = 0.0;
     double max_avg_pkts_per_tx_batch = 0.0;
+    double enc_cyc_per_pkt = 0.0;
+    double dec_cyc_per_pkt = 0.0;
 
+    double lookup_cyc_per_pkt = 0.0;
+    double rx_batch_cyc_per_pkt = 0.0;
     // ---------- Crypto (future) ----------
     uint64_t enc_cycles = 0;
     uint64_t dec_cycles = 0;
@@ -55,6 +59,9 @@ struct Stats
 
     time_t last_reset_time = time(nullptr);
 
+    // ---------- Syscalls ----------
+    uint64_t lookup_cycles = 0;
+    uint64_t rx_batch_cycles = 0;
     void reset_Stats()
     {
         udp_rx_pkts = udp_rx_bytes = 0;
@@ -73,6 +80,8 @@ struct Stats
         avg_pkts_per_tx_batch = 0.0;
 
         enc_cycles = dec_cycles = 0;
+        lookup_cycles = 0;
+        rx_batch_cycles = 0;
 
         last_reset_time = time(nullptr);
     }
@@ -109,7 +118,16 @@ struct Stats
             max_avg_pkts_per_tx_batch =
                 std::max(max_avg_pkts_per_tx_batch, avg_pkts_per_tx_batch);
         }
+        enc_cyc_per_pkt =
+            udp_tx_pkts ? (double)enc_cycles / udp_tx_pkts : 0;
 
+        dec_cyc_per_pkt =
+            udp_rx_pkts ? (double)dec_cycles / udp_rx_pkts : 0;
+
+        lookup_cyc_per_pkt =
+            udp_rx_pkts ? (double)lookup_cycles / udp_rx_pkts : 0;
+        rx_batch_cyc_per_pkt =
+            udp_rx_pkts ? (double)rx_batch_cycles / udp_rx_pkts : 0;
         LOG(LOG_INFO,
             "---- Stats (last %ld sec) ----\n"
             "UDP RX: %lu pkts, %lu bytes, %lu Mbps (max: %lu, min: %lu)\n"
@@ -118,7 +136,9 @@ struct Stats
             "Drops - TUN RX: %lu, UDP TX: %lu, UDP RX: %lu\n"
             "EAGAIN - TUN read: %lu, UDP recv: %lu\n"
             "UDP RX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n"
-            "UDP TX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n",
+            "UDP TX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n"
+            "Enc cycles/pkt: %.2f, Dec cycles/pkt: %.2f\n",
+            "Lookup cycles/pkt: %.2f, RX batch cycles/pkt: %.2f\n",
             delta,
             udp_rx_pkts, udp_rx_bytes, udp_mbps, max_udp_mbps,
             (min_udp_mbps == UINT64_MAX ? 0 : min_udp_mbps),
@@ -128,7 +148,8 @@ struct Stats
             tun_rx_drops, udp_tx_drops, udp_rx_drops,
             tun_read_eagain, udp_recv_eagain,
             udp_rx_batches, avg_pkts_per_rx_batch, max_avg_pkts_per_rx_batch,
-            udp_tx_batches, avg_pkts_per_tx_batch, max_avg_pkts_per_tx_batch);
+            udp_tx_batches, avg_pkts_per_tx_batch, max_avg_pkts_per_tx_batch,
+            enc_cyc_per_pkt, dec_cyc_per_pkt, lookup_cyc_per_pkt, rx_batch_cyc_per_pkt);
 
         log_flush();
     }

@@ -22,6 +22,12 @@
 #include <signal.h>
 
 static volatile sig_atomic_t g_shutdown = 0;
+static inline uint64_t rdtsc()
+{
+    unsigned hi, lo;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
 
 void handle_sigint(int)
 {
@@ -42,7 +48,11 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     // Placeholder for UDP to TUN handling logic
     static char temp[2000];
     Client *client;
+    uint64_t start = rdtsc();
     client = cm.getClientByUdp(client_addr);
+    uint64_t end = rdtsc();
+
+    global_stats.lookup_cycles += (end - start);
 
     if (!client)
     {
@@ -54,8 +64,11 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     int enc_len = n - sizeof(PacketHeader);
     char *enc_payload = (char *)(buf + sizeof(PacketHeader));
     // Decrypt payload
+    uint64_t start = rdtsc();
     enc.crypt(enc_payload, enc_len, temp, client->xor_key);
+    uint64_t end = rdtsc();
 
+    global_stats.dec_cycles += (end - start);
     // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
     if (enc_len < 20)
     {
@@ -256,8 +269,10 @@ int main()
 
             while (true)
             {
+                uint64_t batch_start = rdtsc();
                 int rcvd = recvmmsg(sock, rx_msgs, RX_BATCH, 0, nullptr);
-
+                uint64_t batch_end = rdtsc();
+                global_stats.rx_batch_cycles += (batch_end - batch_start);
                 if (rcvd > 0)
                 {
                     global_stats.udp_rx_batches++;
@@ -342,8 +357,11 @@ int main()
 
                 unsigned char *out = tx_bufs[batch_count];
                 memcpy(out, &hdr, sizeof(hdr));
+                uint64_t start = rdtsc();
                 enc.crypt((char *)main_loop_buf, n, (char *)out + sizeof(hdr), target->xor_key);
+                uint64_t end = rdtsc();
 
+                global_stats.enc_cycles += (end - start);
                 tx_iovecs[batch_count].iov_base = out;
                 tx_iovecs[batch_count].iov_len = sizeof(hdr) + n;
 

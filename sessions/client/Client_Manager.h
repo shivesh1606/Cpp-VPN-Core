@@ -16,13 +16,16 @@
  *   Your Android client always uses the same TUN IP (e.g., 10.8.0.2).
  *   The server assigns a separate internal VPN IP for routing (10.8.0.x).
  */
-struct Client {
-    sockaddr_in client_udp_addr;     ///< Actual (public) UDP address of client
-    uint32_t android_client_tun_ip;  ///< Fixed IP inside Android TUN (10.8.0.2)
-    uint8_t xor_key;                  ///< Simple XOR key for this client
+struct Client
+{
+    sockaddr_in client_udp_addr;    ///< Actual (public) UDP address of client
+    uint32_t android_client_tun_ip; ///< Fixed IP inside Android TUN (10.8.0.2)
+    uint8_t xor_key;                ///< Simple XOR key for this client
+    uint32_t session_id;            ///< Persistent ID for roaming support
 };
 
-enum IpState {
+enum IpState
+{
     FREE = 0,
     RESERVED = 1,
     ACTIVE = 2
@@ -50,7 +53,8 @@ enum IpState {
  *      A simple vector marking IPs as used/free.
  *
  */
-class ClientManager {
+class ClientManager
+{
 
 private:
     /**
@@ -63,6 +67,12 @@ private:
      */
     std::unordered_map<uint32_t, Client> vpn_to_client;
 
+    // Private member
+    std::unordered_map<uint64_t, uint32_t> udp_to_vpn_ip;
+
+    // New: Fast lookup for roaming (SessionID -> VPN_IP)
+    // We store VPN_IP as the value so we can find the primary Client object
+    std::unordered_map<uint32_t, uint32_t> session_to_vpn_ip;
     /**
      * @brief IP allocation pool.
      *
@@ -83,9 +93,10 @@ private:
      */
     uint32_t baseIp;
 
+    // New: Session ID Management
+    uint32_t nextSessionId = 1000; // Simple counter-based pool
 
 public:
-
     /**
      * @brief Constructor for ClientManager.
      *
@@ -98,8 +109,7 @@ public:
      * Creates pool:
      *     10.8.0.10 → 10.8.0.59
      */
-    ClientManager(int poolSize, const char* startIp);
-
+    ClientManager(int poolSize, const char *startIp);
 
     /**
      * @brief Destructor for ClientManager.
@@ -111,7 +121,8 @@ public:
      *
      * @param clientUdpAddr     Public UDP address of client
      * @param androidTunIp      Client’s TUN IP (fixed - ex: 10.8.0.2)
-     *
+     * @param xor_key           XOR key for encrypting/decrypting this client
+     * @param session_id        Persistent session ID for roaming support
      * Steps:
      *   1. Finds free IP from ipPool
      *   2. Creates Client struct
@@ -122,8 +133,7 @@ public:
      * @return uint32_t The server-assigned VPN IP
      *                   (0 if pool exhausted)
      */
-    Client* addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,uint8_t &xor_key);
-
+    Client *addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp, uint8_t &xor_key, uint32_t session_id);
     /**
      * @brief Removes a client using its server-assigned VPN IP.
      *
@@ -142,7 +152,7 @@ public:
      *
      * @return Client* Pointer to client or nullptr if not found
      */
-    Client* getClientByServerIp(uint32_t ip);
+    Client *getClientByServerIp(uint32_t ip);
 
     /**
      * @brief Get client using its real-world UDP address.
@@ -151,15 +161,28 @@ public:
      *
      * @return Client* Pointer to client or nullptr if not found
      */
-    Client* getClientByUdp(const sockaddr_in &addr);
+    Client *getClientByUdp(const sockaddr_in &addr);
 
     bool isIpInUse(uint32_t ip) const;
     bool isIpInStateActive(uint32_t ip) const;
     bool makeIpInUse(uint32_t ip);
     uint32_t getNextAvailableIp();
-    Client* getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr,uint32_t clientTunIp);
+    // Client *getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr, uint32_t clientTunIp);
     void freeIp(uint32_t ip);
 
+    // New: Roaming Support
+    Client *getClientBySessionId(uint32_t session_id);
+    void updateClientEndpoint(uint32_t session_id, const sockaddr_in &newAddr);
+    uint32_t generateSessionId();
+
+    // helper function to pack sockaddr_in to uint64_t for map key
+    inline uint64_t packAddr(const sockaddr_in &addr)
+    {
+        uint64_t key = addr.sin_addr.s_addr;
+        key <<= 32;
+        key |= addr.sin_port;
+        return key;
+    }
 };
 
 // Client_Manager.h ends here

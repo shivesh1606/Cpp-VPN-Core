@@ -32,12 +32,12 @@ void handle_sigint(int)
 
 constexpr int RX_BATCH = 8;
 constexpr int RX_BUF_SIZE = 2000;
-constexpr int TX_BATCH = 8;
+constexpr int TX_BATCH = 3;
 constexpr int TX_BUF_SIZE = 2000;
 
 void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
                     unsigned char *buf, int &n,
-                    struct sockaddr_in &client_addr)
+                    struct sockaddr_in &client_addr, uint32_t  session_id)
 
 {
     // Placeholder for UDP to TUN handling logic
@@ -48,9 +48,21 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     PROFILE_SCOPE_END(lookup_t0, global_stats.lookup_cycles);
     if (!client)
     {
-        LOG(LOG_WARN, "DATA packet from unknown client");
-        global_stats.udp_rx_drops++;
-        return;
+        session_id = ntohl(session_id);
+        LOG(LOG_INFO, "Session ID in packet: %u", session_id);
+        // 1. Try Roaming: Lookup by the Session ID inside the packet
+        client = cm.getClientBySessionId(session_id);
+
+        if (client)
+        {
+            // 2. Found them! Update the port/IP for future packets
+            cm.updateClientEndpoint(session_id, client_addr);
+        }
+        else
+        {
+            LOG(LOG_WARN, "Unauthorized packet from %s", inet_ntoa(client_addr.sin_addr));
+            return;
+        }
     }
     // Encrypted payload starts AFTER header
     int enc_len = n - sizeof(PacketHeader);
@@ -99,6 +111,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         //
 
         uint32_t nextAvailableIp = cm.getNextAvailableIp();
+        uint32_t session_id=cm.generateSessionId();
         if (nextAvailableIp == 0)
         {
             LOG(LOG_ERROR, "No available IPs to assign to new client");
@@ -109,7 +122,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
 
         WelcomePacket welcome{};
         welcome.hdr.type = PKT_WELCOME;
-        welcome.hdr.session_id = hello->client_magic; // unused for now
+        welcome.hdr.session_id = htonl(session_id); // Add this!;
         welcome.assigned_tun_ip = htonl(assigned_ip);
         long long random_b = randomNumGen(1000, 5000);
         welcome.ys = htonl(modexp(G, random_b, P)); // server's public value
@@ -119,7 +132,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
             hello->client_magic,
             assigned_ip,
             ntohl(hello->yc),
-            random_b);
+            random_b,session_id);
 
         sendto(sock,
                (char *)&welcome,
@@ -137,9 +150,9 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, INET_ADDRSTRLEN);
         inet_ntop(AF_INET, &net_addr, assigned_ip_str, INET_ADDRSTRLEN);
 
-        LOG(LOG_INFO, "Handshake: Client %s -> Assigned Virtual IP %s",
+        LOG(LOG_INFO, "Handshake: Client %s -> Assigned Virtual IP %s , Session ID %u",
             client_ip_str,
-            assigned_ip_str);
+            assigned_ip_str, session_id);
     }
     else if (hdr->type == PKT_CLIENT_ACK)
     {
@@ -163,7 +176,7 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         uint8_t xor_key = calculateXORKey(shared_secret);
 
         // Add client to ClientManager
-        cm.addClient(client_addr, session->assigned_tun_ip, xor_key);
+        cm.addClient(client_addr, session->assigned_tun_ip, xor_key, session->session_id);
         // Delete session state as handshake is complete
         client_connection_sessions.eraseSession(client_addr);
     }
@@ -296,7 +309,7 @@ int main()
                         PacketHeader *hdr = (PacketHeader *)buf;
                         if (hdr->type == PKT_DATA)
                         {
-                            handleUdpToTun(cm, enc, tun, buf, n, client_addr);
+                            handleUdpToTun(cm, enc, tun, buf, n, client_addr, hdr->session_id);
                             STAT_ADD(global_stats.udp_rx_bytes, n);
                         }
                         else
@@ -358,7 +371,7 @@ int main()
 
                 PacketHeader hdr;
                 hdr.type = PKT_DATA;
-                hdr.session_id = 0;
+                hdr.session_id = htonl(target->session_id); // Send the actual ID
 
                 unsigned char *out = tx_bufs[batch_count];
                 memcpy(out, &hdr, sizeof(hdr));

@@ -7,3 +7,4 @@ build/
 venv/*
 */plots/*
 Reports/*
+scripts/copyToAws.sh

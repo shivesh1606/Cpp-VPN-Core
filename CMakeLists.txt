@@ -32,7 +32,11 @@ configure_file(
 # ------------------------------
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS "-Wall -Wextra -O2")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS "/W3 /O2")
+else()
+    set(CMAKE_CXX_FLAGS "-Wall -Wextra -O2")
+endif()
 
 add_executable(vpn_server
     main.cpp
@@ -63,6 +67,8 @@ target_include_directories(vpn_server PRIVATE
     . 
     ${CMAKE_BINARY_DIR}/generated
 )
+
+add_subdirectory(vpn_client)
 
 # ---------------- LD_PRELOAD shared library ----------------
 # add_library(perf_hook_full SHARED

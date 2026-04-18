@@ -1,21 +1,24 @@
-/* This program calculates the Key for two persons
-using the Diffie-Hellman Key exchange algorithm using C++ */
-#include <cmath>
-#include <iostream>
+#ifndef DIFFIEHELLMAN_H
+#define DIFFIEHELLMAN_H
 
-using namespace std;
-long long int P=127;
-long long int G=9;
+#include <cstdint>
+#include <cstdlib>
 
-long long int randomNumGen(int lower, int upper) {
-    return rand() % (upper - lower + 1) + lower;
-}
-uint8_t calculateXORKey(uint32_t s) {
-    return (s ^ (s >> 8) ^ (s >> 16) ^ (s >> 24)) & 0xFF;
+inline constexpr long long P = 127;
+inline constexpr long long G = 9;
+
+inline long long randomNumGen(int lower, int upper)
+{
+    return std::rand() % (upper - lower + 1) + lower;
 }
 
-// Power function to return value of a ^ b mod P
-long long modexp(long long base, long long exp, long long mod)
+inline uint8_t calculateXORKey(uint32_t s)
+{
+    return static_cast<uint8_t>((s ^ (s >> 8) ^ (s >> 16) ^ (s >> 24)) & 0xFF);
+}
+
+// Power function to return value of a ^ b mod mod
+inline long long modexp(long long base, long long exp, long long mod)
 {
     long long result = 1;
     base = base % mod;
@@ -30,3 +33,5 @@ long long modexp(long long base, long long exp, long long mod)
     }
     return result;
 }
+
+#endif // DIFFIEHELLMAN_H

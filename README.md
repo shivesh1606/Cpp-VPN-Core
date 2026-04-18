@@ -64,8 +64,23 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 ./script/runbuild.sh
 ```
 
+## Client Build
+
+The VPN client implementation now lives in the `vpn_client/` folder.
+
+```bash
+# Build the client alongside the server
+cmake -B build
+cmake --build build --target vpn_client
+```
+
+> Note: The client is implemented for Linux desktop use and requires root privileges to create/configure the TUN interface.
+
 # Execution (Requires root for TUN device creation)
 sudo ./vpn_server
+
+# VPN Client Execution
+sudo ./build/vpn_client <server-ip> <server-port> [tun-name]
 ---
 
 ## 📫 Professional Contact

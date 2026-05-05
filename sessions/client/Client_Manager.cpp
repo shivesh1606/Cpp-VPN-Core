@@ -33,6 +33,7 @@ Client *ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t andr
     newClient.android_client_tun_ip = androidTunIp;
     newClient.xor_key = xor_key;
     newClient.session_id = session_id;
+    newClient.last_seen = time(nullptr);
 
     makeIpInUse(androidTunIp); // ← THIS is where IP becomes ACTIVE
     auto [it, inserted] = vpn_to_client.emplace(androidTunIp, newClient);
@@ -185,4 +186,62 @@ void ClientManager::updateClientEndpoint(uint32_t session_id, const sockaddr_in 
         udp_to_vpn_ip[newPackedAddr] = client->android_client_tun_ip;
 
     }
+}
+
+void ClientManager::removeClientBySessionId(uint32_t session_id)
+{
+    auto it = session_to_vpn_ip.find(session_id);
+    if (it == session_to_vpn_ip.end())
+    {
+        LOG(LOG_WARN, "[BYE] No client found for session %u", session_id);
+        return;
+    }
+
+    uint32_t vpn_ip = it->second;
+
+    // Log before cleanup
+    char ip_str[INET_ADDRSTRLEN];
+    struct in_addr addr;
+    addr.s_addr = htonl(vpn_ip);
+    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+    LOG(LOG_INFO, "[BYE] Removing client session %u (VPN IP %s)", session_id, ip_str);
+
+    // freeIp handles all map cleanup (vpn_to_client, udp_to_vpn_ip, session_to_vpn_ip, ipPool)
+    freeIp(vpn_ip);
+}
+
+void ClientManager::touchClient(uint32_t session_id)
+{
+    Client *client = getClientBySessionId(session_id);
+    if (client)
+    {
+        client->last_seen = time(nullptr);
+    }
+}
+
+int ClientManager::sweepDeadClients(time_t timeout_sec)
+{
+    time_t now = time(nullptr);
+    int removed = 0;
+
+    // Collect session IDs to remove (can't modify maps while iterating)
+    std::vector<uint32_t> dead_sessions;
+
+    for (auto &[vpn_ip, client] : vpn_to_client)
+    {
+        if ((now - client.last_seen) > timeout_sec)
+        {
+            dead_sessions.push_back(client.session_id);
+        }
+    }
+
+    for (uint32_t sid : dead_sessions)
+    {
+        LOG(LOG_INFO, "[TIMEOUT] Session %u timed out after %ld seconds of silence",
+            sid, (long)timeout_sec);
+        removeClientBySessionId(sid);
+        removed++;
+    }
+
+    return removed;
 }

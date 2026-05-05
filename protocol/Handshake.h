@@ -12,7 +12,8 @@ enum PacketType : uint8_t
     PKT_WELCOME = 2,    // Server → Client (IP + key assigned)
     PKT_CLIENT_ACK = 3, // Client → Server (ack welcome)
     PKT_DATA = 4,       // Encrypted VPN data
-    PKT_BYE = 5         // Optional disconnect (best effort)
+    PKT_BYE = 5,        // Client → Server disconnect (best effort)
+    PKT_KEEPALIVE = 6   // Client → Server heartbeat (header only)
 };
 
 /*

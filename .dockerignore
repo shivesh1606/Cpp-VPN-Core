@@ -1,0 +1,11 @@
+build/
+.git/
+*.o
+*.d
+vpn_client/
+docs/
+*.md
+*.pem
+*.key
+.vscode/
+.idea/

@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <ctime>
 #include <arpa/inet.h>
 
 /**
@@ -22,6 +23,7 @@ struct Client
     uint32_t android_client_tun_ip; ///< Fixed IP inside Android TUN (10.8.0.2)
     uint8_t xor_key;                ///< Simple XOR key for this client
     uint32_t session_id;            ///< Persistent ID for roaming support
+    time_t last_seen;               ///< Last time we got any packet from this client
 };
 
 enum IpState
@@ -170,10 +172,15 @@ public:
     // Client *getClientByClientTunIpAndUdpAddr(const sockaddr_in &addr, uint32_t clientTunIp);
     void freeIp(uint32_t ip);
 
-    // New: Roaming Support
+    // Roaming Support
     Client *getClientBySessionId(uint32_t session_id);
     void updateClientEndpoint(uint32_t session_id, const sockaddr_in &newAddr);
     uint32_t generateSessionId();
+
+    // Disconnect & Heartbeat
+    void removeClientBySessionId(uint32_t session_id);
+    void touchClient(uint32_t session_id);              // update last_seen
+    int  sweepDeadClients(time_t timeout_sec);           // returns count removed
 
     // helper function to pack sockaddr_in to uint64_t for map key
     inline uint64_t packAddr(const sockaddr_in &addr)

@@ -64,6 +64,9 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
             return;
         }
     }
+    // Touch last_seen so the client doesn't get swept
+    client->last_seen = time(nullptr);
+
     // Encrypted payload starts AFTER header
     int enc_len = n - sizeof(PacketHeader);
     char *enc_payload = (char *)(buf + sizeof(PacketHeader));
@@ -181,9 +184,32 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         client_connection_sessions.eraseSession(client_addr);
     }
 
+    else if (hdr->type == PKT_BYE)
+    {
+        if (n < (int)sizeof(PacketHeader))
+        {
+            LOG(LOG_WARN, "Short BYE packet");
+            return;
+        }
+
+        uint32_t session_id = ntohl(hdr->session_id);
+        LOG(LOG_INFO, "[BYE] Received disconnect from %s for session %u",
+            inet_ntoa(client_addr.sin_addr), session_id);
+
+        cm.removeClientBySessionId(session_id);
+    }
+    else if (hdr->type == PKT_KEEPALIVE)
+    {
+        if (n < (int)sizeof(PacketHeader))
+            return;
+
+        uint32_t session_id = ntohl(hdr->session_id);
+        cm.touchClient(session_id);
+        // No response needed — just updates last_seen
+    }
     else
     {
-        LOG(LOG_WARN, "Unknown handshake packet type: %d", hdr->type);
+        LOG(LOG_WARN, "Unknown packet type: %d", hdr->type);
         STAT_ADD(global_stats.handshake_failures, 1);
         return;
     }
@@ -211,6 +237,7 @@ int main()
     }
     unsigned char main_loop_buf[2000];
     const int HANDSHAKE_TIMEOUT = 10; // seconds
+    const int CLIENT_DEAD_TIMEOUT = 60; // seconds — sweep clients with no activity
     fcntl(sock, F_SETFL, O_NONBLOCK);
     fcntl(tun, F_SETFL, O_NONBLOCK);
 
@@ -262,6 +289,13 @@ int main()
             global_stats.reset_Stats();
 
             client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT);
+
+            // Sweep clients that haven't sent data/keepalive
+            int swept = cm.sweepDeadClients(CLIENT_DEAD_TIMEOUT);
+            if (swept > 0)
+            {
+                LOG(LOG_INFO, "[SWEEP] Removed %d dead client(s)", swept);
+            }
         }
 
         fd_set rf;

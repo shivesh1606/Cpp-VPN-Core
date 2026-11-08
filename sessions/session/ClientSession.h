@@ -35,7 +35,8 @@ public:
                     uint32_t session_id);
 
     void eraseSession(const sockaddr_in& addr);
-    void eraseExpiredSessions(time_t timeout_sec);
+    // Returns the assigned VPN IPs of the expired sessions so the caller can free them
+    std::vector<uint32_t> eraseExpiredSessions(time_t timeout_sec);
     SessionState* getSession(const sockaddr_in& addr);
 
 private:

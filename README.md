@@ -57,11 +57,45 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 
 ---
 
+## 🧭 Design Documents & Roadmap
+
+> **Security status:** the current XOR cipher and small-parameter Diffie-Hellman are placeholders. They don't provide confidentiality, integrity, or client authentication. Replacing them is in progress.
+
+Target designs and their rationale are in [docs/design/](docs/design/README.md):
+
+| # | Document | Status |
+|---|---|---|
+| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted |
+| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted |
+| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted |
+| 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked |
+
+- **Plan:** [implementation plan](docs/plan/implementation-plan.md) (milestones M0–M7) · [parked discussions](docs/plan/parked-discussions.md)
+- **Measurements:** [experiments/](experiments/README.md), e.g. [001: per-packet crypto cost](experiments/001-crypto-per-packet-cost/README.md)
+- **Testing without the phone:** [Windows test client](clients/windows/README.md) (`--probe` needs no admin)
+
+## 📚 Reading Guide
+
+New to the concepts in the design docs (AEAD, Noise IK, X25519, tickets…)? The **[reading guide](docs/reading-guide.md)** has:
+- a 5-minute walkthrough of the current engine, with code links;
+- a glossary of every term, each pointing to where we use it and to its primary source;
+- ordered reading paths with the exact sections to read.
+
+| To understand | Start with |
+|---|---|
+| The current engine (TUN, batching, v1 protocol) | [Reading path A](docs/reading-guide.md#path-a--understand-todays-engine--12-h) · [Linux TUN/TAP](https://docs.kernel.org/networking/tuntap.html) · [recvmmsg(2)](https://man7.org/linux/man-pages/man2/recvmmsg.2.html) |
+| Why XOR is replaced, and what AEAD is | [Path B](docs/reading-guide.md#path-b--why-the-current-crypto-must-go--1-h) · [Cryptopals 1.3](https://cryptopals.com/sets/1/challenges/3) · [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439) · [libsodium AEAD](https://doc.libsodium.org/secret-key_cryptography/aead) |
+| The v2 handshake | [Path C](docs/reading-guide.md#path-c--the-v2-handshake--34-h) · [WireGuard whitepaper](https://www.wireguard.com/papers/wireguard.pdf) · [Noise spec](https://noiseprotocol.org/noise.html) · [Noise Explorer: IK](https://noiseexplorer.com/patterns/IK/) |
+| Tickets and access control | [Path D](docs/reading-guide.md#path-d--tickets-and-access-control--12-h) · [RFC 8032 (Ed25519)](https://www.rfc-editor.org/rfc/rfc8032) |
+| The Windows client | [Path E](docs/reading-guide.md#path-e--windows-client-internals--1-h) · [Wintun](https://www.wintun.net/) |
+
+---
+
 ## ⚙️ Building the Core
 
 ```bash
 # Clone and build
-./script/runbuild.sh
+./scripts/runbuild.sh
 ```
 
 # Execution (Requires root for TUN device creation)

@@ -1,0 +1,83 @@
+# Raw output, 2026-11-08. Captured from the original run before run.sh existed: same source and flags,
+# except that the X25519 line did not yet check crypto_scalarmult's return value (no effect on timing).
+# BUILD_OK  (gcc -O2, libsodium "1.0.18", static)
+# model name	: 11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz   (WSL2, Ubuntu 22.04.3 LTS, gcc 11.4.0)
+=== run 1 (pinned to cpu 2) ===
+
+payload 64 B
+  xor (current XorCipher::crypt)                31.0 ns         71 TSC cyc
+  chacha20poly1305-ietf seal                   289.4 ns        667 TSC cyc
+  chacha20poly1305-ietf open (valid)           294.8 ns        679 TSC cyc
+  chacha20poly1305-ietf open (forged->drop)     213.6 ns        492 TSC cyc
+  aes256gcm seal (AES-NI)                      180.2 ns        415 TSC cyc
+  aes256gcm open (valid)                       192.0 ns        442 TSC cyc
+
+payload 512 B
+  xor (current XorCipher::crypt)               197.4 ns        455 TSC cyc
+  chacha20poly1305-ietf seal                   497.0 ns       1145 TSC cyc
+  chacha20poly1305-ietf open (valid)           491.7 ns       1133 TSC cyc
+  chacha20poly1305-ietf open (forged->drop)     321.4 ns        741 TSC cyc
+  aes256gcm seal (AES-NI)                      320.6 ns        739 TSC cyc
+  aes256gcm open (valid)                       318.6 ns        734 TSC cyc
+
+payload 1400 B
+  xor (current XorCipher::crypt)               507.2 ns       1169 TSC cyc
+  chacha20poly1305-ietf seal                  1192.7 ns       2748 TSC cyc
+  chacha20poly1305-ietf open (valid)          1213.8 ns       2797 TSC cyc
+  chacha20poly1305-ietf open (forged->drop)     524.8 ns       1209 TSC cyc
+  aes256gcm seal (AES-NI)                      758.0 ns       1746 TSC cyc
+  aes256gcm open (valid)                       815.2 ns       1878 TSC cyc
+
+per-packet bookkeeping
+  replay window check+update (in order)          1.7 ns          4 TSC cyc
+
+per-handshake (once per connect / 120 s rekey)
+  X25519 scalarmult (Noise IK does 4/side)   31031.8 ns      71497 TSC cyc
+  Ed25519 verify (ticket, server only)       39578.4 ns      91188 TSC cyc
+  BLAKE2b-512 of 64 B (Noise MixHash)          121.2 ns        279 TSC cyc
+
+context: kernel cost of sending one UDP datagram (sendto 1400 B, loopback)
+  sendto() 1400 B                             1241.5 ns       2860 TSC cyc
+=== run 2 (pinned to cpu 2) ===
+
+payload 64 B
+  xor (current XorCipher::crypt)                29.0 ns         67 TSC cyc
+  chacha20poly1305-ietf seal                   285.1 ns        657 TSC cyc
+  chacha20poly1305-ietf open (valid)           293.5 ns        676 TSC cyc
+  chacha20poly1305-ietf open (forged->drop)     206.9 ns        477 TSC cyc
+  aes256gcm seal (AES-NI)                      173.4 ns        400 TSC cyc
+  aes256gcm open (valid)                       188.5 ns        434 TSC cyc
+
+payload 512 B
+  xor (current XorCipher::crypt)               189.3 ns        436 TSC cyc
+  chacha20poly1305-ietf seal                   502.7 ns       1158 TSC cyc
+  chacha20poly1305-ietf open (valid)           481.6 ns       1110 TSC cyc
+  chacha20poly1305-ietf open (forged->drop)     326.0 ns        751 TSC cyc
+  aes256gcm seal (AES-NI)                      306.5 ns        706 TSC cyc
+  aes256gcm open (valid)                       310.7 ns        716 TSC cyc
+
+payload 1400 B
+  xor (current XorCipher::crypt)               515.5 ns       1188 TSC cyc
+  chacha20poly1305-ietf seal                  1153.0 ns       2657 TSC cyc
+  chacha20poly1305-ietf open (valid)          1164.7 ns       2683 TSC cyc
+  chacha20poly1305-ietf open (forged->drop)     528.6 ns       1218 TSC cyc
+  aes256gcm seal (AES-NI)                      749.2 ns       1726 TSC cyc
+  aes256gcm open (valid)                       794.1 ns       1830 TSC cyc
+
+per-packet bookkeeping
+  replay window check+update (in order)          2.0 ns          5 TSC cyc
+
+per-handshake (once per connect / 120 s rekey)
+  X25519 scalarmult (Noise IK does 4/side)   29151.6 ns      67165 TSC cyc
+  Ed25519 verify (ticket, server only)       41671.5 ns      96007 TSC cyc
+  BLAKE2b-512 of 64 B (Noise MixHash)          113.4 ns        261 TSC cyc
+
+context: kernel cost of sending one UDP datagram (sendto 1400 B, loopback)
+  sendto() 1400 B                             1494.1 ns       3442 TSC cyc
+=== reference: XOR at -O3 (pinned to cpu 2) ===
+payload 64 B
+  xor (current XorCipher::crypt)                 3.4 ns          8 TSC cyc
+payload 512 B
+  xor (current XorCipher::crypt)                11.4 ns         26 TSC cyc
+payload 1400 B
+  xor (current XorCipher::crypt)                36.4 ns         84 TSC cyc

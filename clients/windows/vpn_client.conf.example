@@ -1,0 +1,26 @@
+# Cpp-VPN-Core Windows test client: key=value, '#' starts a comment.
+# Precedence: defaults < this file < command-line arguments.
+
+server=127.0.0.1
+port=5555
+
+# error | warn | info | debug
+log_level=info
+# log_file=vpn_client.log
+
+# Tunnel mode
+mtu=1400
+# dns=1.1.1.1
+route_all_traffic=false
+reconnect=true
+reconnect_delay=5
+reconnect_max_attempts=0
+
+# Keepalive every N seconds (the server removes clients after 60 s of silence)
+keepalive_interval=15
+# Seconds without downstream data before reconnecting. 0 = disabled.
+# Keep it 0 with protocol v1: the server sends nothing to idle clients.
+timeout=0
+
+# Probe mode (--probe): seconds of keepalives before BYE
+probe_duration=20

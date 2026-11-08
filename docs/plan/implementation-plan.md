@@ -12,7 +12,7 @@
 - **One milestone, one branch, one PR to `master`.** Each milestone ends in a deployable state: the server builds in Docker, and the existing Android app keeps working until M6/M7.
 - **Wire compatibility:** v1 stays supported until M7. v2 packets start with `ver = 0x20`, so one binary can demultiplex both (design 02 §3).
 - **Test on Windows first:** every protocol change lands in the Windows test client before Android. The C++ protocol code is shared between server and Windows client.
-- **Tests:** plain CTest executables (no external framework). Crypto and Noise use published test vectors (design 01 C5, design 02 §10).
+- **Tests:** every milestone ships **GoogleTest** unit tests under [`tests/`](../../tests/README.md), run by CTest inside the Docker build (a failing test fails the build). Crypto and Noise also use published test vectors (design 01 C5, design 02 §10). Paths that need TUN/root get an end-to-end script under `tests/e2e/`.
 - **Measure:** milestones that touch the hot path re-run or extend an experiment.
 
 ## Milestone overview
@@ -27,7 +27,7 @@ M3 Node config & identity ────┴─────────────
 | # | Milestone | Status | Depends on |
 |---|---|---|---|
 | M0 | Windows test client (protocol v1) | **Done** (branch `feature/windows-test-client`) | — |
-| M1 | Cipher-layer refactor, no wire change, plus hardening fixes H1–H2 | Not started | — |
+| M1 | Cipher-layer refactor, no wire change, plus hardening fixes H1–H2 | **In review** (branch `feature/m1-cipher-layer`) | — |
 | M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | Not started | M1 |
 | M3 | Node config file and node identity key | Not started; decisions N1–N5 accepted 2026-11-08 | — |
 | M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | Not started | M2, M3 |
@@ -71,6 +71,22 @@ Design 01 §2.2, §4, rollout step 1.
 - Docker build is green.
 - The Windows probe and tunnel work, and the Android app works unchanged (same wire bytes).
 - `enc_cyc_per_pkt` stays within ±5% of before (the virtual call is negligible).
+
+**Delivered (2026-11-08)**
+- **New code:**
+  - `crypto/SessionLock.h` (`SessionLock`, `CipherBackend`, `CipherId`);
+  - `crypto/CipherRegistry.{h,cpp}`;
+  - `crypto/backends/XorBackend.{h,cpp}`;
+  - `net/ip/Ipv4.h`.
+- **Removed:** `crypto/XorCipher.{h,cpp}`.
+- **`Client` and `addClient`:** `Client` holds `rx`/`tx` locks and `tx_counter`; `addClient` takes ownership of both locks and rejects null locks or out-of-pool IPs.
+- **H1:** TUN packets are routed only if `ipv4Destination` succeeds (length ≥ 20 and version 4).
+- **H2:** `MSG_TRUNC` datagrams are dropped (new `udp_rx_truncated` counter).
+- **Bounds check (found during M1):** each send slot is checked to hold header + payload + tag before encrypting. The TUN read buffer (2000 B) and send slot (2000 B) previously allowed a 5-byte overflow for payloads over 1995 B.
+- **Decrypt order:** the RX size check now runs before decryption. Failed `open()` increments the new `rx_auth_fail` counter.
+- **Build:** CMake builds `vpn_core` (static library) linked by `vpn_server` and `unit_tests`. The Dockerfile installs `libgtest-dev` and runs `ctest`.
+- **Tests:** 35 GoogleTest cases ([tests/README.md](../../tests/README.md)), including a contract suite parameterized over all registered backends. The e2e script is [tests/e2e/v1_roundtrip.py](../../tests/e2e/v1_roundtrip.py).
+- **Not measured:** the `enc_cyc_per_pkt` ±5% check needs sustained traffic on a profiling build. It's deferred to experiment 003.
 
 ## M2 — libsodium backend, KATs, benchmark
 

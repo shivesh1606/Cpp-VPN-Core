@@ -11,7 +11,9 @@
 #include "sessions/client/Client_Manager.h"
 #include "crypto/DiffieHellman.h"
 #include "net/tun/TunDevice.h"
-#include "crypto/XorCipher.h"
+#include "net/ip/Ipv4.h"
+#include "crypto/CipherRegistry.h"
+#include "crypto/backends/XorBackend.h"
 #include "sessions/session/ClientSession.h"
 #include "protocol/Handshake.h"
 #include "net/socket/SocketManager.h"
@@ -35,13 +37,12 @@ constexpr int RX_BUF_SIZE = 2000;
 constexpr int TX_BATCH = 3;
 constexpr int TX_BUF_SIZE = 2000;
 
-void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
+void handleUdpToTun(ClientManager &cm, int &tun,
                     unsigned char *buf, int &n,
                     struct sockaddr_in &client_addr, uint32_t  session_id)
 
 {
-    // Placeholder for UDP to TUN handling logic
-    static char temp[2000];
+    static uint8_t temp[2000];
     Client *client;
     PROFILE_SCOPE_START(lookup_t0);
     client = cm.getClientByUdp(client_addr);
@@ -67,21 +68,29 @@ void handleUdpToTun(ClientManager &cm, XorCipher &enc, int &tun,
     // Touch last_seen so the client doesn't get swept
     client->last_seen = time(nullptr);
 
-    // Encrypted payload starts AFTER header
-    int enc_len = n - sizeof(PacketHeader);
-    char *enc_payload = (char *)(buf + sizeof(PacketHeader));
-    // Decrypt payload
-    PROFILE_SCOPE_START(dec_t0);
-    enc.crypt(enc_payload, enc_len, temp, client->xor_key);
-    PROFILE_SCOPE_END(dec_t0, global_stats.dec_cycles);
-    // Basic sanity: ensure we have at least IPv4 header size in decrypted packet
-    if (enc_len < 20)
+    // Encrypted payload (ciphertext + tag) starts AFTER header
+    const size_t enc_len = n - sizeof(PacketHeader);
+    const uint8_t *enc_payload = buf + sizeof(PacketHeader);
+    const size_t overhead = client->rx->overhead();
+    // Basic sanity: the plaintext must hold at least an IPv4 header (checked before decrypting)
+    if (enc_len < net::kIpv4MinHeader + overhead)
     {
-        LOG(LOG_WARN, "Decrypted packet too small (%d bytes) - skipping", enc_len);
+        LOG(LOG_WARN, "Encrypted packet too small (%zu bytes) - skipping", enc_len);
+        STAT_ADD(global_stats.udp_rx_drops, 1);
         return;
     }
+    // Decrypt payload. v1 has no counter or AAD; v2 passes the header as AAD (design 01 C1/C2)
+    PROFILE_SCOPE_START(dec_t0);
+    bool ok = client->rx->open(0, nullptr, 0, enc_payload, enc_len, temp);
+    PROFILE_SCOPE_END(dec_t0, global_stats.dec_cycles);
+    if (!ok)
+    {
+        STAT_ADD(global_stats.rx_auth_fail, 1);
+        return;
+    }
+    const size_t plain_len = enc_len - overhead;
     PROFILE_SCOPE_START(tun_wr_t0);
-    ssize_t write_count = write(tun, temp, enc_len);
+    ssize_t write_count = write(tun, temp, plain_len);
     PROFILE_SCOPE_END(tun_wr_t0, global_stats.tun_write_cycles);
 
     if (write_count < 0)
@@ -205,8 +214,19 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         uint32_t shared_secret = modexp(session->yc, session->b, P);
         uint8_t xor_key = calculateXORKey(shared_secret);
 
+        // Protocol v1: one XOR byte, same key both directions (design 01, section 1)
+        const crypto::CipherBackend *xor_backend = crypto::CipherRegistry::instance().find(crypto::kCipherXor);
+        uint8_t key[crypto::kKeyBytes];
+        crypto::expandV1XorKey(xor_key, key);
+
         // Add client to ClientManager
-        cm.addClient(client_addr, session->assigned_tun_ip, xor_key, session->session_id);
+        if (!cm.addClient(client_addr, session->assigned_tun_ip,
+                          xor_backend->newLock(key), xor_backend->newLock(key),
+                          session->session_id))
+        {
+            LOG(LOG_ERROR, "Handshake: failed to register session %u", session->session_id);
+            STAT_ADD(global_stats.handshake_failures, 1);
+        }
         // Delete session state as handshake is complete
         client_connection_sessions.eraseSession(client_addr);
     }
@@ -255,7 +275,11 @@ int main()
     ClientSession client_connection_sessions;
     ClientManager cm(100, "10.8.0.2");
     int tun = TunDevice::create("tun0");
-    XorCipher &enc = XorCipher::getInstance();
+    if (!crypto::CipherRegistry::instance().find(crypto::kCipherXor))
+    {
+        LOG(LOG_ERROR, "Protocol v1 requires the xor backend, which is not registered");
+        return 1;
+    }
     int sock = SocketManager::createUdpSocket(5555);
     if (sock < 0)
     {
@@ -368,6 +392,13 @@ int main()
                         STAT_ADD(global_stats.udp_rx_pkts, 1);
                         unsigned char *buf = rx_bufs[i];
                         struct sockaddr_in &client_addr = rx_addrs[i];
+                        // H2: datagram larger than RX_BUF_SIZE was cut by the kernel; drop it
+                        if (rx_msgs[i].msg_hdr.msg_flags & MSG_TRUNC)
+                        {
+                            STAT_ADD(global_stats.udp_rx_drops, 1);
+                            STAT_ADD(global_stats.udp_rx_truncated, 1);
+                            continue;
+                        }
                         if (n < (int)sizeof(PacketHeader))
                         {
                             STAT_ADD(global_stats.udp_rx_drops, 1);
@@ -379,7 +410,7 @@ int main()
                         PacketHeader *hdr = (PacketHeader *)buf;
                         if (hdr->type == PKT_DATA)
                         {
-                            handleUdpToTun(cm, enc, tun, buf, n, client_addr, hdr->session_id);
+                            handleUdpToTun(cm, tun, buf, n, client_addr, hdr->session_id);
                             STAT_ADD(global_stats.udp_rx_bytes, n);
                         }
                         else
@@ -430,14 +461,25 @@ int main()
                 STAT_ADD(global_stats.tun_rx_pkts, 1);
                 STAT_ADD(global_stats.tun_rx_bytes, n);
 
-                // ---- ORIGINAL LOGIC, INLINE ----
-                in_addr dst_a;
-                memcpy(&dst_a.s_addr, main_loop_buf + 16, 4);
-                uint32_t dst_host = ntohl(dst_a.s_addr);
+                // H1: only route complete IPv4 packets (short reads / IPv6 are dropped)
+                uint32_t dst_host = 0;
+                if (!net::ipv4Destination(main_loop_buf, (size_t)n, dst_host))
+                {
+                    STAT_ADD(global_stats.tun_rx_drops, 1);
+                    continue;
+                }
 
                 Client *target = cm.getClientByServerIp(dst_host);
                 if (!target)
                     continue;
+
+                // Header + ciphertext + tag must fit the TX slot
+                const size_t wire_len = sizeof(PacketHeader) + (size_t)n + target->tx->overhead();
+                if (wire_len > (size_t)TX_BUF_SIZE)
+                {
+                    STAT_ADD(global_stats.tun_rx_drops, 1);
+                    continue;
+                }
 
                 PacketHeader hdr;
                 hdr.type = PKT_DATA;
@@ -446,10 +488,12 @@ int main()
                 unsigned char *out = tx_bufs[batch_count];
                 memcpy(out, &hdr, sizeof(hdr));
                 PROFILE_SCOPE_START(enc_t0);
-                enc.crypt((char *)main_loop_buf, n, (char *)out + sizeof(hdr), target->xor_key);
+                // v1: no counter/AAD; v2 passes the header as AAD and tx_counter++ (design 01 C1/C2)
+                target->tx->seal(target->tx_counter++, nullptr, 0,
+                                 main_loop_buf, (size_t)n, out + sizeof(hdr));
                 PROFILE_SCOPE_END(enc_t0, global_stats.enc_cycles);
                 tx_iovecs[batch_count].iov_base = out;
-                tx_iovecs[batch_count].iov_len = sizeof(hdr) + n;
+                tx_iovecs[batch_count].iov_len = wire_len;
 
                 tx_msgs[batch_count].msg_hdr.msg_iov = &tx_iovecs[batch_count];
                 tx_msgs[batch_count].msg_hdr.msg_iovlen = 1;

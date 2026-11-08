@@ -47,12 +47,17 @@ add_library(vpn_core STATIC
 
     crypto/CipherRegistry.cpp
     crypto/NodeIdentity.cpp
+    crypto/Base64Url.cpp
     crypto/backends/XorBackend.cpp
     crypto/backends/SodiumAead.cpp
     crypto/DiffieHellman.cpp
     crypto/KeyDerivation.cpp
 
     protocol/Handshake.cpp
+    protocol/noise/Noise.cpp
+    protocol/v2/Wire.cpp
+    protocol/v2/Server.cpp
+    protocol/v2/Client.cpp
 
     utils/counter_definition.cpp
     utils/logger.cpp
@@ -99,6 +104,16 @@ else()
     target_compile_definitions(vpn_core PUBLIC CPPVPN_WITH_OPENSSL=0)
 endif()
 
+# ---------------- Protocol v2 build switches (design 02 sections 7, 8) ----------------
+option(ALLOW_OPEN_AUTH "Allow auth.mode = open (any client key). Development only." OFF)
+option(ENABLE_KEYLOG "Write session keys to VPN_KEYLOG_FILE for decrypting captures. Debug only." OFF)
+target_compile_definitions(vpn_core PUBLIC
+    CPPVPN_ALLOW_OPEN_AUTH=$<BOOL:${ALLOW_OPEN_AUTH}>
+    CPPVPN_ENABLE_KEYLOG=$<BOOL:${ENABLE_KEYLOG}>)
+if(ALLOW_OPEN_AUTH OR ENABLE_KEYLOG)
+    message(WARNING "Insecure debug option enabled: ALLOW_OPEN_AUTH=${ALLOW_OPEN_AUTH} ENABLE_KEYLOG=${ENABLE_KEYLOG}")
+endif()
+
 # ---------------- Server ----------------
 add_executable(vpn_server main.cpp)
 target_link_libraries(vpn_server PRIVATE vpn_core)
@@ -110,6 +125,10 @@ target_link_libraries(crypto_bench PRIVATE vpn_core)
 target_compile_definitions(crypto_bench PRIVATE
     CPPVPN_BUILD_FLAGS="${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_bt}}"
     CPPVPN_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
+# ---------------- Protocol v2 test client (Linux; the Windows client is clients/windows) ----------------
+add_executable(vpn_client_v2 tools/vpn_client_v2.cpp)
+target_link_libraries(vpn_client_v2 PRIVATE vpn_core)
 
 # ---------------- Unit tests (GoogleTest, run with ctest) ----------------
 include(CTest)   # defines BUILD_TESTING (default ON)

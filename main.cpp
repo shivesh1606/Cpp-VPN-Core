@@ -16,6 +16,9 @@
 #include "config/Cli.h"
 #include "config/NodeConfig.h"
 #include "crypto/NodeIdentity.h"
+#include "protocol/v2/Server.h"
+#include <memory>
+#include <time.h>
 #include "version.h"
 #include <cstdio>
 #include <sstream>
@@ -268,6 +271,88 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         return;
     }
 }
+// Protocol v2 uses the same client address pool as v1 (one tun0).
+class ClientManagerPool : public v2::IpPool
+{
+public:
+    explicit ClientManagerPool(ClientManager &cm) : cm_(cm) {}
+    uint32_t allocate() override { return cm_.getNextAvailableIp(); }
+    void activate(uint32_t ip) override { cm_.makeIpInUse(ip); }
+    void release(uint32_t ip) override { cm_.freeIp(ip); }
+
+private:
+    ClientManager &cm_;
+};
+
+static uint64_t monotonicMs()
+{
+    timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return uint64_t(t.tv_sec) * 1000 + uint64_t(t.tv_nsec) / 1000000;
+}
+
+// Builds the v2 responder from node.conf (design 02 section 7). Returns null when the node has
+// no identity (no config file): then only protocol v1 is served, as before M3.
+static std::unique_ptr<v2::Server> makeV2Server(const config::NodeConfig &cfg,
+                                                const crypto::NodeIdentity &id, v2::IpPool &pool)
+{
+    if (!id.loaded())
+        return nullptr;
+    v2::ServerConfig sc;
+    sc.auth = cfg.auth_mode == "open" ? v2::ServerConfig::kOpen : v2::ServerConfig::kAllowlist;
+    sc.allowed.insert(cfg.allowed_keys.begin(), cfg.allowed_keys.end());
+    auto idOf = [](const std::string &name) -> int {
+        for (const auto &b : crypto::CipherRegistry::instance().all())
+            if (name == b->algorithmName())
+                return b->algorithmId();
+        return -1;
+    };
+    sc.algorithms.clear();
+    for (const auto &a : cfg.algorithms)
+        if (idOf(a) >= 0)
+            sc.algorithms.push_back(uint8_t(idOf(a)));
+    for (const auto &kv : cfg.impl)
+        if (idOf(kv.first) >= 0)
+            sc.impl[uint8_t(idOf(kv.first))] = kv.second;
+    sc.allow_insecure_xor = cfg.allow_insecure_xor;
+    sc.keepalive_s = uint16_t(cfg.keepalive_s);
+    sc.pending_expiry_ms = uint32_t(cfg.pending_expiry_s) * 1000;
+    sc.reject_after_ms = uint32_t(cfg.reject_after_s) * 1000;
+    auto server = std::make_unique<v2::Server>(id.privateKey(), sc, pool);
+#if CPPVPN_ENABLE_KEYLOG
+    if (const char *path = getenv("VPN_KEYLOG_FILE"))
+    {
+        FILE *f = std::fopen(path, "a");
+        if (f)
+        {
+            LOG(LOG_WARN, "KEYLOG ENABLED: session keys are written to %s (debug build)", path);
+            server->keylog = [f](const std::string &line) {
+                std::fprintf(f, "%s\n", line.c_str());
+                std::fflush(f);
+            };
+        }
+    }
+#endif
+    LOG(LOG_INFO, "Protocol v2 enabled: auth=%s (%zu allowed clients), v1 %s",
+        cfg.auth_mode.c_str(), cfg.allowed_keys.size(), cfg.accept_v1 ? "also accepted" : "disabled");
+    return server;
+}
+
+static void logV2Stats(const v2::Server &s)
+{
+    const v2::ServerStats &v = s.stats();
+    LOG(LOG_INFO,
+        "v2: active %zu pending %zu | hs resp %lu retx %lu confirm ack/data %lu/%lu rekeys %lu expired %lu | "
+        "hs drop fmt %lu mac1 %lu decrypt %lu auth %lu replay %lu no_cipher %lu pool %lu | "
+        "tr drop fmt %lu no_session %lu replay %lu auth %lu src_ip %lu ack %lu | roams %lu | "
+        "removed bye/reject/idle %lu/%lu/%lu",
+        s.activeSessions(), s.pendingSessions(), v.hs_resp_sent, v.hs_retransmit, v.hs_confirm_ack,
+        v.hs_confirm_data, v.rekeys, v.hs_expired, v.hs_drop_format, v.hs_drop_mac1, v.hs_drop_decrypt,
+        v.hs_drop_auth, v.hs_drop_replay, v.hs_drop_no_cipher, v.hs_drop_pool_empty, v.tr_drop_format,
+        v.tr_drop_no_session, v.tr_drop_replay, v.tr_drop_auth, v.tr_drop_src_ip, v.tr_drop_ack, v.roams,
+        v.removed_bye, v.removed_reject, v.removed_idle);
+}
+
 // --gen-key / --pubkey / --check-config / --help / --version. Returns the exit code, or -1 to
 // continue into server mode. These modes need no root and touch neither TUN nor the network.
 static int runCliMode(const config::CliOptions &cli, const config::NodeConfig &cfg,
@@ -424,6 +509,14 @@ int main(int argc, char **argv)
     for (const auto &b : crypto::CipherRegistry::instance().all())
         LOG(LOG_INFO, "Cipher backend: id %u %s/%s%s", b->algorithmId(), b->algorithmName(),
             b->implName(), b->insecure() ? " (INSECURE, protocol v1 only)" : "");
+    ClientManagerPool v2_pool(cm);
+    std::unique_ptr<v2::Server> v2srv = makeV2Server(cfg, node_identity, v2_pool);
+    if (!cfg.accept_v1 && !v2srv)
+    {
+        LOG(LOG_ERROR, "node.accept_v1 = false needs protocol v2 (a node key)");
+        log_flush();
+        return 2;
+    }
     int sock = SocketManager::createUdpSocket(cfg.port);
     if (sock < 0)
     {
@@ -462,6 +555,10 @@ int main(int argc, char **argv)
     struct mmsghdr tx_msgs[TX_BATCH];
     struct iovec tx_iovecs[TX_BATCH];
     unsigned char tx_bufs[TX_BATCH][TX_BUF_SIZE];
+    struct sockaddr_in tx_addrs[TX_BATCH]; // v2 destinations (v1 points at Client::client_udp_addr)
+    memset(tx_addrs, 0, sizeof(tx_addrs));
+    static unsigned char v2_plain[RX_BUF_SIZE], v2_reply[v2::kRespLen];
+    std::vector<v2::Server::Outgoing> v2_out;
     memset(tx_msgs, 0, sizeof(tx_msgs));
     for (int i = 0; i < TX_BATCH; i++)
     {
@@ -482,8 +579,27 @@ int main(int argc, char **argv)
 
             // select() now wakes every second; skip the stats block for idle seconds
             if (global_stats.udp_rx_pkts || global_stats.tun_rx_pkts || global_stats.handshake_pkts)
+            {
                 global_stats.print_Stats();
+                if (v2srv)
+                    logV2Stats(*v2srv);
+            }
             global_stats.reset_Stats();
+
+            // Protocol v2 timers: pending expiry, reject-after, idle removal, server keepalives
+            if (v2srv)
+            {
+                v2_out.clear();
+                v2srv->tick(monotonicMs(), v2_out);
+                for (const auto &o : v2_out)
+                {
+                    sockaddr_in to{};
+                    to.sin_family = AF_INET;
+                    to.sin_addr.s_addr = o.to.addr;
+                    to.sin_port = o.to.port;
+                    sendto(sock, o.pkt.data(), o.pkt.size(), 0, (sockaddr *)&to, sizeof(to));
+                }
+            }
 
             // Handshakes that never got an ACK: return their reserved IPs to the pool
             for (uint32_t ip : client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT))
@@ -541,6 +657,42 @@ int main(int argc, char **argv)
                         {
                             STAT_ADD(global_stats.udp_rx_drops, 1);
                             STAT_ADD(global_stats.udp_rx_truncated, 1);
+                            continue;
+                        }
+                        // Protocol v2 packets start with 0x20, never a v1 type byte (design 02 section 3)
+                        if (n >= 1 && buf[0] == v2::kVersion)
+                        {
+                            if (!v2srv)
+                            {
+                                STAT_ADD(global_stats.udp_rx_drops, 1); // no node key: v1 only
+                                continue;
+                            }
+                            const v2::Endpoint from{client_addr.sin_addr.s_addr, client_addr.sin_port};
+                            size_t reply_len = 0, plain_len = 0;
+                            PROFILE_SCOPE_START(v2_rx_t0);
+                            const v2::Server::Rx r = v2srv->receive(buf, (size_t)n, from, monotonicMs(),
+                                                                    v2_reply, reply_len, v2_plain, plain_len);
+                            PROFILE_SCOPE_END(v2_rx_t0, global_stats.dec_cycles);
+                            if (r == v2::Server::Rx::kDeliver)
+                            {
+                                PROFILE_SCOPE_START(tun_wr_v2_t0);
+                                if (write(tun, v2_plain, plain_len) < 0)
+                                    STAT_ADD(global_stats.udp_rx_drops, 1);
+                                PROFILE_SCOPE_END(tun_wr_v2_t0, global_stats.tun_write_cycles);
+                                STAT_ADD(global_stats.udp_rx_bytes, n);
+                            }
+                            else if (r == v2::Server::Rx::kReply)
+                            {
+                                sendto(sock, v2_reply, reply_len, 0, (sockaddr *)&client_addr, sizeof(client_addr));
+                                STAT_ADD(global_stats.handshake_pkts, 1);
+                            }
+                            else if (r == v2::Server::Rx::kDropped)
+                                STAT_ADD(global_stats.udp_rx_drops, 1);
+                            continue;
+                        }
+                        if (!cfg.accept_v1)
+                        {
+                            STAT_ADD(global_stats.udp_rx_drops, 1);
                             continue;
                         }
                         if (n < (int)sizeof(PacketHeader))
@@ -613,6 +765,34 @@ int main(int argc, char **argv)
                     continue;
                 }
 
+                if (v2srv && v2srv->ownsTunIp(dst_host))
+                {
+                    if ((size_t)n + v2::kTransportMinLen > (size_t)TX_BUF_SIZE)
+                    {
+                        STAT_ADD(global_stats.tun_rx_drops, 1);
+                        continue;
+                    }
+                    size_t v2_len = 0;
+                    v2::Endpoint to;
+                    PROFILE_SCOPE_START(enc_v2_t0);
+                    const bool sealed = v2srv->seal(dst_host, main_loop_buf, (size_t)n, monotonicMs(),
+                                                    tx_bufs[batch_count], v2_len, to);
+                    PROFILE_SCOPE_END(enc_v2_t0, global_stats.enc_cycles);
+                    if (!sealed)
+                        continue; // session not confirmed yet
+                    tx_addrs[batch_count].sin_family = AF_INET;
+                    tx_addrs[batch_count].sin_addr.s_addr = to.addr;
+                    tx_addrs[batch_count].sin_port = to.port;
+                    tx_iovecs[batch_count].iov_base = tx_bufs[batch_count];
+                    tx_iovecs[batch_count].iov_len = v2_len;
+                    tx_msgs[batch_count].msg_hdr.msg_iov = &tx_iovecs[batch_count];
+                    tx_msgs[batch_count].msg_hdr.msg_iovlen = 1;
+                    tx_msgs[batch_count].msg_hdr.msg_name = &tx_addrs[batch_count];
+                    tx_msgs[batch_count].msg_hdr.msg_namelen = sizeof(tx_addrs[batch_count]);
+                    batch_count++;
+                }
+                else
+                {
                 Client *target = cm.getClientByServerIp(dst_host);
                 if (!target)
                     continue;
@@ -648,6 +828,7 @@ int main(int argc, char **argv)
                     sizeof(target->client_udp_addr);
 
                 batch_count++;
+                } // v1
                 // ---- FLUSH CONDITIONS ----
                 if (batch_count == TX_BATCH)
                 {

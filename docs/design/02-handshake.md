@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (2026-11-08) |
+| **Status** | Accepted (2026-11-08). **Implemented in M4** (server, Linux test client, Windows client); tickets (`auth_mode = ticket`) follow in M5. See §11. |
 | **Scope** | Authenticated key exchange between client and node; session lifecycle; transport header |
 | **Produces** | `k_c2s`, `k_s2c`, consumed by [01 — Cipher layer](01-cipher-layer.md) (`CipherBackend::newLock`) |
 | **Consumes** | Access ticket from [03 — Tickets](README.md#index) (opaque here, via `TicketVerifier`) |
@@ -29,7 +29,7 @@ Not WireGuard wire-compatible (different hash, no PSK, different header). That's
 | G4 | Client identity hiding | `s_c` encrypted under the `es`-derived key; ticket inside the encrypted payload |
 | G5 | 1-RTT to the first data packet | msg1/msg2; ACK sent together with the first data |
 | G6 | Replay resistance | TAI64N timestamp, strictly increasing per `s_c` |
-| G7 | No state or IP allocation before authentication | Processing order in §5 (fixes the pool-exhaustion bug at [main.cpp:159](../../main.cpp#L159)) |
+| G7 | No state or IP allocation before authentication | Processing order in §5 (fixes the pool-exhaustion bug at [main.cpp:162](../../main.cpp#L162)) |
 | G8 | Idempotent retransmission (keeps the PR #2 / `fa857d9` behaviour) | msg2 cache keyed by `hash(msg1)` |
 | G9 | No reflection amplification | msg2 (97 B) < msg1 (≈290 B) |
 | G10 | Unauthenticated scanners get no response | `mac1` keyed by `S_pub` |
@@ -176,10 +176,10 @@ recv HS_INIT
 | Parameter | Value | Reference / current |
 |---|---|---|
 | Handshake retry | 5 s + jitter (0–333 ms), new msg1 each attempt | WireGuard `REKEY_TIMEOUT`; app today: 4 attempts |
-| Pending expiry | 10 s | today `[timers] pending_expiry_s` ([deploy/node.conf.example](../../deploy/node.conf.example), used at [main.cpp:434](../../main.cpp#L434)) |
+| Pending expiry | 10 s | today `[timers] pending_expiry_s` ([deploy/node.conf.example](../../deploy/node.conf.example), used at [main.cpp:527](../../main.cpp#L527)) |
 | Keepalive | 15 s (sent in msg2 `keepalive_s`) | today 15 s (`KEEPALIVE_INTERVAL_MS`, app) |
 | Rekey after | 120 s (client-initiated) | WireGuard `REKEY_AFTER_TIME`; doc 01 C4 |
-| Reject after | 180 s | WireGuard `REJECT_AFTER_TIME`; replaces the v1 idle sweep `[timers] dead_after_s` = 60 s ([main.cpp:435](../../main.cpp#L435)) |
+| Reject after | 180 s | WireGuard `REJECT_AFTER_TIME`; replaces the v1 idle sweep `[timers] dead_after_s` = 60 s ([main.cpp:528](../../main.cpp#L528)) |
 
 `auth_mode` in `node.conf` lets the handshake ship before tickets:
 
@@ -198,21 +198,69 @@ recv HS_INIT
 
 ## 9. Code impact
 
-| Current | Change |
-|---|---|
-| [crypto/DiffieHellman.h](../../crypto/DiffieHellman.h), [crypto/DiffieHellman.cpp](../../crypto/DiffieHellman.cpp), [crypto/KeyDerivation.*](../../crypto/KeyDerivation.h) | Removed. New `protocol/noise/{SymmetricState,HandshakeState}.{h,cpp}` on libsodium |
-| [protocol/Handshake.h](../../protocol/Handshake.h) structs | v2 layouts (§3); v1 kept behind a demux on `ver` during migration |
-| [sessions/session/ClientSession.*](../../sessions/session/ClientSession.h) (keyed by address + `client_magic`) | `HandshakeTable`: PENDING sessions by `sender_idx` and `s_c`, plus the msg2 cache |
-| [sessions/client/Client_Manager.*](../../sessions/client/Client_Manager.h) | Indexes `receiver_idx` / `s_c` / `tun_ip`; `generateSessionId()` (sequential) replaced by random unique `u32` |
-| `handleHandshake` HELLO/ACK branches ([main.cpp:121-239](../../main.cpp#L121-L239)) | §5 pipeline; ACK handling per D3 |
-| `handleUdpToTun` lookup ([main.cpp:55-74](../../main.cpp#L55-L74)) | Lookup by `receiver_idx`, then `open()`, then endpoint update |
-| Android app (separate repo `NetSpeedv3`): `MyVpnService.performHandshake()` in `MyVpnService.kt` | Kotlin initiator on Lazysodium; same test vectors |
+Status after M4 in the last column. v1 code stays until M7 (Android moves to v2 in M6).
+
+| Before | Change | Status |
+|---|---|---|
+| [crypto/DiffieHellman.h](../../crypto/DiffieHellman.h), [crypto/DiffieHellman.cpp](../../crypto/DiffieHellman.cpp), [crypto/KeyDerivation.*](../../crypto/KeyDerivation.h) | Removed. New `protocol/noise/{SymmetricState,HandshakeState}.{h,cpp}` on libsodium | Noise done: [protocol/noise/Noise.h](../../protocol/noise/Noise.h) (one file: `CipherState`, `SymmetricState`, `HandshakeIK`). Toy DH removed in M7 with v1 |
+| [protocol/Handshake.h](../../protocol/Handshake.h) structs | v2 layouts (§3); v1 kept behind a demux on `ver` during migration | Done: [protocol/v2/Wire.h](../../protocol/v2/Wire.h); demux on the first byte in `main.cpp` |
+| [sessions/session/ClientSession.*](../../sessions/session/ClientSession.h) (keyed by address + `client_magic`) | `HandshakeTable`: PENDING sessions by `sender_idx` and `s_c`, plus the msg2 cache | Done inside [protocol/v2/Server.h](../../protocol/v2/Server.h) (sessions by index, peers by `s_c`, msg2 cache); `ClientSession` stays for v1 |
+| [sessions/client/Client_Manager.*](../../sessions/client/Client_Manager.h) | Indexes `receiver_idx` / `s_c` / `tun_ip`; `generateSessionId()` (sequential) replaced by random unique `u32` | Done in `v2::Server` (random indexes); `ClientManager` now only owns the shared IP pool and v1 clients |
+| `handleHandshake` HELLO/ACK branches ([main.cpp:124-242](../../main.cpp#L124-L242)) | §5 pipeline; ACK handling per D3 | Done: `Server::onInit`, `Server::onTransport` |
+| `handleUdpToTun` lookup ([main.cpp:58-77](../../main.cpp#L58-L77)) | Lookup by `receiver_idx`, then `open()`, then endpoint update | Done (v2); the v1 lookup is unchanged |
+| Android app (separate repo `NetSpeedv3`): `MyVpnService.performHandshake()` in `MyVpnService.kt` | Kotlin initiator on Lazysodium; same test vectors | M6. The vector file is [tests/protocol/vectors/](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt) |
 
 ## 10. Verification
+
+Status: 1 and 3 done in M4 ([tests/protocol/](../../tests/README.md)); 2 waits for the Kotlin client (M6). Cross-implementation was also checked between the Linux server (libsodium 1.0.18) and the Windows client (MinGW, libsodium 1.0.20).
 
 1. Noise test vectors for `Noise_IK_25519_ChaChaPoly_BLAKE2b` from the published vector sets (cacophony / snow; see the [Noise wiki test vectors][noise-vectors]). The same vector file is run in the C++ and Kotlin unit tests.
 2. Cross-implementation test: C++ responder against a Kotlin initiator (JVM test harness), compared byte for byte.
 3. Negative tests: bad mac1, tampered ciphertext, replayed msg1 (same and older ts), low-order `e_c`, no cipher intersection, empty pool. Each must increment exactly one drop counter.
+
+## 11. As implemented (M4)
+
+| Part | Where | Notes |
+|---|---|---|
+| Noise IK | [protocol/noise/Noise.h](../../protocol/noise/Noise.h) | Byte-identical to the [cacophony and snow vectors](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt): handshake, handshake hash, 4 transport messages. HMAC/HKDF are also checked against Python `hmac` + `hashlib.blake2b`. |
+| Wire format | [protocol/v2/Wire.h](../../protocol/v2/Wire.h) | Sizes as §3.2: HS_RESP 97 B, ACK 38 B, KEEPALIVE/BYE 30 B, HS_INIT 151 B (2 ciphers, no ticket) or 287 B with a 136 B ticket |
+| Responder | [protocol/v2/Server.h](../../protocol/v2/Server.h) | Socket-free engine; `main.cpp` only does I/O |
+| Initiator | [protocol/v2/Client.h](../../protocol/v2/Client.h) | Shared by [tools/vpn_client_v2.cpp](../../tools/vpn_client_v2.cpp) (Linux) and the [Windows client](../../clients/windows/README.md) |
+| Replay window | [protocol/v2/ReplayWindow.h](../../protocol/v2/ReplayWindow.h) | RFC 6479, 32 × 64-bit blocks, window 1984 counters. Checked against a reference model over 200 000 random counters. |
+
+Details the design left open, as built:
+
+- **Byte order:**
+  - `sender_idx`, `receiver_idx`, `counter`, `ticket_len` and `keepalive_s` are little-endian.
+  - `tun_ip` is in network order, because it's an address.
+  - TAI64N is big-endian per its spec (label = 2^62 + Unix seconds), so timestamps compare as bytes.
+- **Strict payload parsing:**
+  - `offer_n` must be 1–8.
+  - The ticket can be at most 512 B.
+  - There must be no trailing bytes.
+  - A payload that decrypts but doesn't parse counts as `HS_DROP_FORMAT`.
+- **ACK:** only counter 0 is accepted, and the payload must equal `handshake_id`; otherwise the packet counts as `tr_drop_ack`. Counters for DATA, KEEPALIVE and BYE start at 1 in both directions.
+- **Anti-spoofing (added):** the inner IPv4 source of every DATA packet must be the client's own tunnel address; otherwise `tr_drop_src_ip`. Without this check, a client could inject packets carrying another client's source address.
+- **Addresses belong to the client key `s_c`, not the session:**
+  - A rekey keeps the IP.
+  - A newer handshake replaces a pending one without freeing the IP.
+  - The IP is freed when the client's last session goes: BYE, pending expiry, reject-after or idle.
+- **Previous key:** after a rekey the old session stays accepted on receive, so in-flight packets still decrypt. It's removed when the next rekey supersedes it, or at reject-after. The server sends only with the current key.
+- **Server keepalive:** the server sends `KEEPALIVE` after `keepalive_s` without sending anything. Clients therefore treat 3 × `keepalive_s` of silence as a lost session and reconnect.
+- **Rekey:** the client starts a new HS_INIT at `rekey_after_s` and repeats it every 5 s until the HS_RESP arrives. Traffic keeps flowing under the old key in the meantime. If no rekey succeeds by 180 s, the client reconnects.
+- **`auth_mode`:**
+  - `allowlist` reads [`allowed_clients`](../../deploy/node.conf.example): one `<base64url key> [name]` per line.
+  - `open` needs `-DALLOW_OPEN_AUTH=ON`.
+  - `ticket` is rejected until M5.
+  - Without a config file the node has no key, so v2 is off and only v1 runs, as before M3.
+- **Protocol v1 alongside v2:** `[node] accept_v1 = true` by default, for clients that haven't been updated. Set it to `false` once every client speaks v2.
+- **Key log:** with `-DENABLE_KEYLOG=ON` and `VPN_KEYLOG_FILE`, the server writes one line per confirmed session: `handshake_id receiver_idx k_c2s k_s2c`. The build prints a CMake warning when the option is on.
+
+Still open:
+- the mac2 cookie (D2, [parked P3](../plan/parked-discussions.md));
+- tickets (M5);
+- the Kotlin initiator (M6);
+- experiments 003 (throughput, v1 vs v2) and 004 (HELLO flood vs mac1), deferred together with the other benchmarks.
 
 ## References
 

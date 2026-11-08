@@ -10,27 +10,27 @@ Primary sources (RFCs, specs, official docs) come first. Books and blogs are mar
 
 ---
 
-## 1. Current engine in 5 minutes (protocol v1, `master`)
+## 1. Current engine in 5 minutes (protocols v1 and v2)
 
 ```
-                     ┌──────────────────────────── main() main.cpp:339 ────────────────────────────┐
-                     │ setup: --config / node.conf → NodeConfig, node key (config/, crypto/)       │
-                     │        TunDevice::create(+configure)  createUdpSocket(port)  ClientManager  │
-                     │        defaults: tun0, 5555, pool 10.8.0.2 … 10.8.0.101                     │
-                     │                                                                             │
-                     │ loop  main.cpp:473  select(sock, tun, 1 s timeout)                          │
-                     │   ├─ every second: stats, expire pending handshakes (10 s), sweep dead (60 s)│
-                     │   ├─ UDP readable → recvmmsg ×8  main.cpp:525                               │
-                     │   │     type == DATA → handleUdpToTun   main.cpp:47                          │
-                     │   │                     lookup by ip:port, else by session_id (roaming)      │
-                     │   │                     rx->open() (XorLock on v1) → write(tun)              │
-                     │   │     otherwise    → handleHandshake  main.cpp:114                         │
-                     │   │                     HELLO → reserve IP, DH, WELCOME                      │
-                     │   │                     ACK   → ClientManager::addClient                     │
-                     │   │                     BYE / KEEPALIVE → remove / touch                     │
-                     │   └─ TUN readable → read() → dst IP → client → tx->seal() → sendmmsg ×3      │
-                     │                     main.cpp:592 … 689                                      │
-                     └─────────────────────────────────────────────────────────────────────────────┘
+main()  main.cpp:424
+  setup     --config / node.conf -> NodeConfig; node key; allowed_clients     (config/, crypto/)
+            TunDevice::create (+ configure from tun_cidr), UDP socket(port), ClientManager (IP pool)
+            v2::Server if the node has a key (protocol/v2/Server.cpp); defaults = v1 only
+  loop      main.cpp:570  select(sock, tun, 1 s timeout)
+  |-- every second   stats; v2 tick (pending expiry, reject-after, keepalives)  main.cpp:593
+  |                  v1: expire pending HELLOs (10 s), sweep idle clients (60 s)
+  |-- UDP readable   recvmmsg x8  main.cpp:641
+  |     first byte 0x20 -> v2::Server::receive                                main.cpp:663
+  |         HS_INIT  -> design 02 section 5 pipeline -> HS_RESP (sendto)
+  |         ACK / DATA / KEEPALIVE / BYE -> replay window, open(), roaming; DATA -> write(tun)
+  |     else (v1, if accept_v1)
+  |         DATA     -> handleUdpToTun  main.cpp:50   lookup ip:port / session_id, XorLock, write(tun)
+  |         other    -> handleHandshake main.cpp:117  HELLO / ACK / BYE / KEEPALIVE
+  `-- TUN readable   read() -> IPv4 destination                                main.cpp:744
+        v2 session owns it -> v2::Server::seal                                main.cpp:768
+        else v1 client     -> XorLock seal
+        -> sendmmsg x3 batch                                                  main.cpp:837
 ```
 
 | Component | File | What to read in it |
@@ -41,6 +41,7 @@ Primary sources (RFCs, specs, official docs) come first. Books and blogs are mar
 | Pending handshakes | [sessions/session/ClientSession.h](../sessions/session/ClientSession.h), [.cpp](../sessions/session/ClientSession.cpp) | `SessionState`, `eraseExpiredSessions` |
 | Key exchange (placeholder) | [crypto/DiffieHellman.h](../crypto/DiffieHellman.h) | `P=127` toy DH; why it's insecure: design 01 §1, design 02 |
 | Cipher layer (pluggable) | [crypto/SessionLock.h](../crypto/SessionLock.h), [crypto/CipherRegistry.cpp](../crypto/CipherRegistry.cpp), [crypto/backends/](../crypto/backends/) | `SessionLock::seal/open`, registry order, `XorBackend` (the v1 wire; insecure), and `AeadLock<P>` with the libsodium and OpenSSL primitives (built and tested; on the wire from M4). Design 01 §2.2 |
+| Protocol v2 (M4) | [protocol/noise/Noise.h](../protocol/noise/Noise.h), [protocol/v2/](../protocol/v2/), [tools/vpn_client_v2.cpp](../tools/vpn_client_v2.cpp) | Noise IK; wire layouts; `Server` (responder, sessions, timers, drop counters); `Client` (initiator, also used by the Windows client); design 02 §11 |
 | Node config and identity (M3) | [config/](../config/), [crypto/NodeIdentity.h](../crypto/NodeIdentity.h), [deploy/node.conf.example](../deploy/node.conf.example) | INI parser, `NodeConfig` validation, CLI (`--config`, `--set`, `--check-config`, `--gen-key`); plan Discussion 4a |
 | Tests and benchmark | [tests/README.md](../tests/README.md), [tools/crypto_bench.cpp](../tools/crypto_bench.cpp) | GoogleTest layout and KATs; `crypto_bench` (experiment 002) |
 | TUN device | [net/tun/TunDevice.cpp](../net/tun/TunDevice.cpp) | `IFF_TUN | IFF_NO_PI`, `TUNSETIFF` |
@@ -89,6 +90,8 @@ Primary sources (RFCs, specs, official docs) come first. Books and blogs are mar
 | **base64url** | URL-safe base64 without padding, used for keys in files and configs | Node key file, `issuer_pk.N` | [RFC 4648 §5](https://www.rfc-editor.org/rfc/rfc4648#section-5) |
 | **CIDR, pool** | `10.8.0.1/24`: tun0 address plus prefix; clients get server+1 … broadcast−1 | [net/ip/Cidr.h](../net/ip/Cidr.h), `tun_cidr` (plan N5) | [RFC 4632 §3.1](https://www.rfc-editor.org/rfc/rfc4632#section-3.1) |
 | **SIOCSIFADDR / SIOCSIFFLAGS** | ioctls that set an interface address and bring it up (what `ip addr`/`ip link` do) | `TunDevice::configure` | [netdevice(7)](https://man7.org/linux/man-pages/man7/netdevice.7.html) |
+| **Allowlist (`allowed_clients`)** | File of client public keys a v2 node accepts (`auth.mode = allowlist`) | [deploy/node.conf.example](../deploy/node.conf.example), design 02 §7 | (concept as in WireGuard `AllowedIPs`/peer lists: [WireGuard: cryptokey routing](https://www.wireguard.com/#cryptokey-routing)) |
+| **Handshake ID (`hsid`)** | First 8 bytes of the final Noise handshake hash; logged by client and server | design 02 §8 | [Noise §5.2 (handshake hash)](https://noiseprotocol.org/noise.html#the-symmetricstate-object) |
 | **receiver_idx** | Random 32-bit routing index in every packet, replacing the sequential session ID | Design 02 §3 | [WireGuard whitepaper §5.4.2 (sender index)](https://www.wireguard.com/papers/wireguard.pdf) |
 | **Control plane / data plane** | Who decides access vs who forwards packets | Design docs README, design 03 §1 | [WireGuard: conceptual overview](https://www.wireguard.com/#conceptual-overview) (data-plane-only model, for contrast) |
 | **Ticket / issuer** | Signed access grant / the party holding the signing key | Design 03 | [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032) (signatures); compare with [RFC 7519 JWT](https://www.rfc-editor.org/rfc/rfc7519) |

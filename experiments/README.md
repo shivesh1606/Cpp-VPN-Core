@@ -23,5 +23,5 @@ Measurements that inform design decisions. Design docs ([docs/design/](../docs/d
 
 | # | Experiment | Depends on |
 |---|---|---|
-| 003 | End-to-end tunnel throughput and latency: XOR (v1) vs AEAD (v2) over the same path (Windows client → node) | M4 |
-| 004 | Handshake rate and CPU cost under a HELLO flood (mac1 effectiveness) | M4 |
+| 003 | End-to-end tunnel throughput and latency: XOR (v1) vs AEAD (v2) over the same path (Windows client → node) | M4 (done); run deferred with the other benchmarks |
+| 004 | Handshake rate and CPU cost under a HELLO flood (mac1 effectiveness) | M4 (done); run deferred |

@@ -88,7 +88,6 @@ std::string registeredAlgorithms()
     return s;
 }
 
-constexpr const char *kNotYetM4 = "accepted, but not used until protocol v2 (milestone M4)";
 constexpr const char *kNotYetM5 = "accepted, but not used until tickets (milestone M5)";
 
 using Handler = std::function<void(Ctx &, const std::string &)>;
@@ -150,7 +149,6 @@ const std::map<std::string, Handler> &fixedKeys()
                      return c.error("unknown algorithm '" + a + "' (this binary has: " +
                                     registeredAlgorithms() + ")");
              c.cfg.algorithms = list;
-             c.warn(kNotYetM4);
          }},
         {"crypto.allow_insecure_xor", [](Ctx &c, const std::string &v) {
              if (!parseBool(v, c.cfg.allow_insecure_xor))
@@ -158,21 +156,31 @@ const std::map<std::string, Handler> &fixedKeys()
          }},
         // ---- [auth] ----
         {"auth.mode", [](Ctx &c, const std::string &v) {
-             if (v == "open")
+             if (v == "allowlist")
                  c.cfg.auth_mode = v;
-             else if (v == "allowlist")
-                 c.error("'allowlist' needs protocol v2 (milestone M4); this binary only supports "
-                         "'open', and refuses to start rather than pretend to authenticate");
+             else if (v == "open")
+             {
+#if CPPVPN_ALLOW_OPEN_AUTH
+                 c.cfg.auth_mode = v;
+                 c.warn("INSECURE: any client key is accepted (development build)");
+#else
+                 c.error("'open' accepts any client and needs a build with -DALLOW_OPEN_AUTH=ON "
+                         "(development only); use 'allowlist'");
+#endif
+             }
              else if (v == "ticket")
-                 c.error("'ticket' needs tickets (milestone M5); this binary only supports 'open'");
+                 c.error("'ticket' needs tickets (milestone M5); use 'allowlist' until then");
              else
                  c.error("expected open | allowlist | ticket, got '" + v + "'");
+         }},
+        {"node.accept_v1", [](Ctx &c, const std::string &v) {
+             if (!parseBool(v, c.cfg.accept_v1))
+                 c.error("expected true or false, got '" + v + "'");
          }},
         {"auth.allowed_clients", [](Ctx &c, const std::string &v) {
              if (v.empty())
                  return c.error("path must not be empty");
              c.cfg.allowed_clients = v;
-             c.warn(kNotYetM4);
          }},
         {"auth.revocation_url", [](Ctx &c, const std::string &v) {
              if (v.rfind("https://", 0) != 0)
@@ -183,14 +191,9 @@ const std::map<std::string, Handler> &fixedKeys()
         // ---- [timers] ----
         {"timers.pending_expiry_s", [](Ctx &c, const std::string &v) { intKey(c, v, 1, 300, c.cfg.pending_expiry_s); }},
         {"timers.dead_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 5, 86400, c.cfg.dead_after_s); }},
-        {"timers.rekey_after_s", [](Ctx &c, const std::string &v) {
-             if (intKey(c, v, 10, 3600, c.cfg.rekey_after_s))
-                 c.warn(kNotYetM4);
-         }},
-        {"timers.reject_after_s", [](Ctx &c, const std::string &v) {
-             if (intKey(c, v, 10, 7200, c.cfg.reject_after_s))
-                 c.warn(kNotYetM4);
-         }},
+        {"timers.keepalive_s", [](Ctx &c, const std::string &v) { intKey(c, v, 0, 300, c.cfg.keepalive_s); }},
+        {"timers.rekey_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 10, 3600, c.cfg.rekey_after_s); }},
+        {"timers.reject_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 10, 7200, c.cfg.reject_after_s); }},
     };
     return keys;
 }
@@ -210,7 +213,6 @@ bool patternKey(Ctx &c, const std::string &section, const std::string &key, cons
         else
         {
             c.cfg.impl[alg] = v;
-            c.warn(kNotYetM4);
         }
         return true;
     }
@@ -316,7 +318,64 @@ NodeConfig loadNodeConfig(const std::string &path, const std::vector<std::string
                                 std::to_string(cfg.rekey_after_s) + ")");
     if (cfg.from_file && cfg.node_key.empty())
         cfg.node_key = kDefaultNodeKeyPath;
+    if (cfg.from_file && cfg.allowed_clients.empty())
+        cfg.allowed_clients = kDefaultAllowedClientsPath;
+    if (cfg.from_file && cfg.auth_mode == "allowlist" && report.ok())
+        loadAllowedClients(cfg.allowed_clients, cfg, report);
     return cfg;
+}
+
+bool loadAllowedClients(const std::string &path, NodeConfig &cfg, ConfigReport &report)
+{
+    // One client per line: <43-char base64url X25519 public key> [name]. '#' starts a comment.
+    std::string text, err;
+    if (!readTextFile(path, text, err))
+    {
+        report.errors.push_back("auth.allowed_clients: " + err +
+                                " (one client public key per line; create it, it may be empty)");
+        return false;
+    }
+    cfg.allowed_keys.clear();
+    cfg.allowed_names.clear();
+    std::istringstream in(text);
+    std::string line;
+    int no = 0;
+    bool ok = true;
+    while (std::getline(in, line))
+    {
+        no++;
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos)
+            line.erase(hash);
+        std::istringstream fields(line);
+        std::string key, name;
+        if (!(fields >> key))
+            continue;
+        std::getline(fields, name);
+        name.erase(0, name.find_first_not_of(" \t"));
+        while (!name.empty() && (name.back() == '\r' || name.back() == ' ' || name.back() == '\t'))
+            name.pop_back();
+        uint8_t pk[crypto::kX25519Bytes];
+        const std::string where = path + ":" + std::to_string(no);
+        if (!crypto::fromBase64Url(key, pk, sizeof(pk)))
+        {
+            report.errors.push_back(where + ": not a client public key (43 base64url characters)");
+            ok = false;
+            continue;
+        }
+        const std::string raw(reinterpret_cast<const char *>(pk), sizeof(pk));
+        if (std::find(cfg.allowed_keys.begin(), cfg.allowed_keys.end(), raw) != cfg.allowed_keys.end())
+        {
+            report.errors.push_back(where + ": duplicate key");
+            ok = false;
+            continue;
+        }
+        cfg.allowed_keys.push_back(raw);
+        cfg.allowed_names[raw] = name.empty() ? key.substr(0, 8) : name;
+    }
+    if (ok && cfg.allowed_keys.empty())
+        report.warnings.push_back(path + ": no clients listed; no protocol v2 client can connect");
+    return ok;
 }
 
 std::string describe(const NodeConfig &cfg)
@@ -344,10 +403,14 @@ std::string describe(const NodeConfig &cfg)
     o << "crypto            algorithms " << list(cfg.algorithms);
     for (const auto &kv : cfg.impl)
         o << "; " << kv.first << "=" << kv.second;
-    o << (cfg.allow_insecure_xor ? "; INSECURE xor allowed" : "") << "  [protocol v2, M4]\n";
-    o << "auth.mode         " << cfg.auth_mode << "\n";
+    o << (cfg.allow_insecure_xor ? "; INSECURE xor allowed" : "") << "\n";
+    o << "node.accept_v1    " << (cfg.accept_v1 ? "true (protocol v1: XOR, unauthenticated)" : "false") << "\n";
+    o << "auth.mode         " << cfg.auth_mode;
+    if (cfg.auth_mode == "allowlist" && !cfg.allowed_clients.empty())
+        o << " (" << cfg.allowed_keys.size() << " clients from " << cfg.allowed_clients << ")";
+    o << "\n";
     o << "timers            pending " << cfg.pending_expiry_s << " s, v1 idle sweep "
-      << cfg.dead_after_s << " s, rekey " << cfg.rekey_after_s << " s, reject "
+      << cfg.dead_after_s << " s, keepalive " << cfg.keepalive_s << " s, rekey " << cfg.rekey_after_s << " s, reject "
       << cfg.reject_after_s << " s\n";
     return o.str();
 }

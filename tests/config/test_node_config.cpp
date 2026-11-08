@@ -27,13 +27,17 @@ protected:
     void TearDown() override
     {
         unlink(path_.c_str());
+        unlink(allowed_.c_str());
         rmdir(dir_.c_str());
     }
     // Writes `text` as the config file and loads it with `overrides`.
     NodeConfig load(const std::string &text, const std::vector<std::string> &overrides = {})
     {
         path_ = dir_ + "/node.conf";
-        std::ofstream(path_) << text;
+        allowed_ = dir_ + "/allowed_clients";
+        if (write_allowed_)
+            std::ofstream(allowed_) << allowed_text_;
+        std::ofstream(path_) << text << "\n[auth]\nallowed_clients = " << allowed_ << "\n";
         report_ = ConfigReport{};
         return loadNodeConfig(path_, overrides, report_);
     }
@@ -56,7 +60,9 @@ protected:
         return false;
     }
 
-    std::string dir_, path_;
+    std::string dir_, path_, allowed_;
+    std::string allowed_text_;
+    bool write_allowed_ = true;
     ConfigReport report_;
 };
 
@@ -78,7 +84,9 @@ TEST(NodeConfigDefaults, MatchThePreM3Constants)
     EXPECT_EQ(c.dead_after_s, 60);         // was CLIENT_DEAD_TIMEOUT
     EXPECT_FALSE(c.configure_tun);         // tun0 address set outside the server, as before
     EXPECT_TRUE(c.node_key.empty());       // no identity required without a config file
-    EXPECT_EQ(c.auth_mode, "open");
+    EXPECT_EQ(c.auth_mode, "allowlist"); // protocol v2 needs a config file (node key) anyway
+    EXPECT_TRUE(c.accept_v1);
+    EXPECT_EQ(c.keepalive_s, 15);
 }
 
 TEST_F(NodeConfigTest, FileValuesApplyAndNodeKeyDefaults)
@@ -156,26 +164,69 @@ TEST_F(NodeConfigTest, TunCidrWithNoClientAddressesIsRejected)
     EXPECT_TRUE(hasError("no client addresses left after 10.8.0.254")) << allErrors();
 }
 
-// The config must never claim protection the binary does not implement.
-TEST_F(NodeConfigTest, OnlyOpenAuthModeIsAcceptedUntilM4)
+// The config must never claim protection the binary does not implement, nor run without client
+// authentication by accident.
+TEST_F(NodeConfigTest, AuthModes)
 {
-    load("[auth]\nmode = open\n");
-    EXPECT_TRUE(report_.ok()) << allErrors();
     load("[auth]\nmode = allowlist\n");
-    EXPECT_TRUE(hasError("'allowlist' needs protocol v2 (milestone M4)")) << allErrors();
+    EXPECT_TRUE(report_.ok()) << allErrors();
+    load("[auth]\nmode = open\n");
+    EXPECT_EQ(report_.ok(), bool(CPPVPN_ALLOW_OPEN_AUTH)) << allErrors();
+    if (!CPPVPN_ALLOW_OPEN_AUTH)
+    {
+        EXPECT_TRUE(hasError("needs a build with -DALLOW_OPEN_AUTH=ON")) << allErrors();
+    }
     load("[auth]\nmode = ticket\n");
     EXPECT_TRUE(hasError("'ticket' needs tickets (milestone M5)"));
     load("[auth]\nmode = none\n");
     EXPECT_TRUE(hasError("expected open | allowlist | ticket"));
 }
 
+TEST_F(NodeConfigTest, AllowedClientsFile)
+{
+    const std::string k1(43, 'A'), k2 = std::string(42, 'A') + "E"; // two valid 32-byte keys
+    allowed_text_ = "# clients of this node\n" + k1 + "  laptop   # Windows\n\n" + k2 + "\r\n";
+    NodeConfig c = load("[node]\nid = n1\n");
+    ASSERT_TRUE(report_.ok()) << allErrors();
+    ASSERT_EQ(c.allowed_keys.size(), 2u);
+    EXPECT_EQ(c.allowed_names.at(c.allowed_keys[0]), "laptop");
+    EXPECT_EQ(c.allowed_names.at(c.allowed_keys[1]), k2.substr(0, 8)); // no name: key prefix
+    EXPECT_NE(describe(c).find("2 clients from"), std::string::npos);
+
+    allowed_text_ = k1 + "\nnot-a-key\n" + k1 + "\n";
+    load("[node]\nid = n1\n");
+    EXPECT_TRUE(hasError("allowed_clients:2: not a client public key")) << allErrors();
+    EXPECT_TRUE(hasError("allowed_clients:3: duplicate key"));
+
+    allowed_text_ = "# nobody yet\n";
+    load("[node]\nid = n1\n");
+    EXPECT_TRUE(report_.ok());
+    EXPECT_TRUE(hasWarning("no clients listed"));
+
+    write_allowed_ = false;
+    unlink((dir_ + "/allowed_clients").c_str());
+    load("[node]\nid = n1\n");
+    EXPECT_TRUE(hasError("auth.allowed_clients: cannot open")) << allErrors();
+}
+
+TEST_F(NodeConfigTest, V1SwitchAndKeepalive)
+{
+    NodeConfig c = load("[node]\naccept_v1 = false\n[timers]\nkeepalive_s = 0\n");
+    ASSERT_TRUE(report_.ok()) << allErrors();
+    EXPECT_FALSE(c.accept_v1);
+    EXPECT_EQ(c.keepalive_s, 0);
+    load("[timers]\nkeepalive_s = 301\n");
+    EXPECT_TRUE(hasError("timers.keepalive_s: expected an integer in 0..300"));
+}
+
 TEST_F(NodeConfigTest, CryptoIsValidatedAgainstTheRegistry)
 {
+    allowed_text_ = std::string(43, 'A') + "\n"; // one client, so no "empty allowlist" warning
     const NodeConfig c = load("[crypto]\nalgorithms = chacha20poly1305\nimpl.chacha20poly1305 = libsodium\n");
     ASSERT_TRUE(report_.ok()) << allErrors();
     EXPECT_EQ(c.algorithms, std::vector<std::string>{"chacha20poly1305"});
     EXPECT_EQ(c.impl.at("chacha20poly1305"), "libsodium");
-    EXPECT_TRUE(hasWarning("not used until protocol v2"));
+    EXPECT_TRUE(report_.warnings.empty()) << "crypto keys are live since M4";
 
     load("[crypto]\nalgorithms = chacha20poly1305, rot13\n");
     EXPECT_TRUE(hasError("unknown algorithm 'rot13'")) << allErrors();
@@ -228,9 +279,14 @@ TEST_F(NodeConfigTest, SyntaxErrorAndMissingFile)
 // The documented reference config must stay valid as the schema evolves.
 TEST(NodeConfigExample, DeployExampleIsValid)
 {
+    char tmpl[] = "/tmp/cppvpn_allowed_XXXXXX";
+    const int fd = mkstemp(tmpl); // the example points at /etc/cppvpn/allowed_clients
+    ASSERT_GE(fd, 0);
+    close(fd);
     ConfigReport r;
-    const NodeConfig c =
-        loadNodeConfig(std::string(CPPVPN_SOURCE_DIR) + "/deploy/node.conf.example", {}, r);
+    const NodeConfig c = loadNodeConfig(std::string(CPPVPN_SOURCE_DIR) + "/deploy/node.conf.example",
+                                        {std::string("auth.allowed_clients=") + tmpl}, r);
+    unlink(tmpl);
     std::string errs;
     for (const auto &e : r.errors)
         errs += e + "\n";

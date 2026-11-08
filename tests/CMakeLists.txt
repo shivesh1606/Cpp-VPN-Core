@@ -26,6 +26,9 @@ add_executable(unit_tests
     config/test_cli.cpp
     crypto/test_node_identity.cpp
     sessions/test_client_manager.cpp
+    protocol/test_noise.cpp
+    protocol/test_v2_wire.cpp
+    protocol/test_v2_engine.cpp
 )
 target_link_libraries(unit_tests PRIVATE vpn_core GTest::gtest_main)
 target_compile_definitions(unit_tests PRIVATE CPPVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

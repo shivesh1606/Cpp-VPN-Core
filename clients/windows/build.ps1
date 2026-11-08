@@ -6,7 +6,8 @@ $ErrorActionPreference = "Stop"
 $repo = Resolve-Path "$PSScriptRoot\..\.."
 if (Test-Path $MinGW) { $env:PATH = "$MinGW;$env:PATH" }
 
-cmake -S "$repo\clients\windows" -B "$repo\build\windows-client" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+$prefix = Split-Path $MinGW -Parent   # e.g. C:\msys64\mingw64: libsodium (pacman -S mingw-w64-x86_64-libsodium)
+cmake -S "$repo\clients\windows" -B "$repo\build\windows-client" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++ "-DCMAKE_PREFIX_PATH=$prefix"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 cmake --build "$repo\build\windows-client"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

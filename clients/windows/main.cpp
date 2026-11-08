@@ -1,5 +1,7 @@
-// Windows test client for Cpp-VPN-Core — speaks protocol v1 (as on master):
-//   HELLO / WELCOME / CLIENT_ACK / DATA / BYE / KEEPALIVE, toy DH (P=127) + 1-byte XOR.
+// Windows test client for Cpp-VPN-Core.
+//   protocol v2 (--protocol v2): Noise IK handshake + AEAD transport (design doc 02), shared engine
+//                in protocol/v2/Client.cpp; see ProtocolV2.inc.
+//   protocol v1 (default): HELLO / WELCOME / CLIENT_ACK / DATA / BYE / KEEPALIVE, toy DH + 1-byte XOR.
 // Modes:
 //   tunnel (default) — Wintun adapter, routes, DNS, MTU, auto-reconnect. Needs Administrator + wintun.dll.
 //   --probe          — handshake + keepalives + BYE only; no adapter, no admin. Prints timings.
@@ -22,6 +24,8 @@
 #include <string>
 #include <algorithm>
 #include <chrono>
+#include <memory>
+#include <sodium.h>
 #include "wintun.h"
 
 #ifdef _MSC_VER
@@ -70,6 +74,12 @@ struct Config
     // --probe mode
     bool        probe                  = false;
     int         probe_duration         = 20;  // seconds of keepalives before BYE
+    // protocol v2 (design doc 02)
+    std::string protocol               = "v1";          // v1 | v2
+    std::string server_pub;                             // node public key (vpn_server --pubkey)
+    std::string client_key             = "client.key";  // from vpn_client --gen-key
+    std::string offer                  = "chacha20poly1305,aes256gcm";
+    int         rekey_after            = 120;           // seconds (design 02 section 7)
 };
 
 static std::string trim(const std::string &s)
@@ -116,6 +126,11 @@ static Config loadConfig(const char *path)
         else if (key == "timeout")               cfg.timeout = std::stoi(val);
         else if (key == "route_all_traffic")     cfg.route_all_traffic = (val == "true" || val == "1");
         else if (key == "probe_duration")        cfg.probe_duration = std::stoi(val);
+        else if (key == "protocol")              cfg.protocol = val;
+        else if (key == "server_pub")            cfg.server_pub = val;
+        else if (key == "client_key")            cfg.client_key = val;
+        else if (key == "offer")                 cfg.offer = val;
+        else if (key == "rekey_after")           cfg.rekey_after = std::stoi(val);
     }
     return cfg;
 }
@@ -727,6 +742,8 @@ static int runProbe(const Config &cfg)
     return 0;
 }
 
+#include "ProtocolV2.inc"
+
 static bool isElevated()
 {
     HANDLE token = nullptr;
@@ -749,6 +766,12 @@ static void printUsage()
         "  --duration SEC        Probe duration before BYE (default 20)\n"
         "  --route-all           Send all IPv4 traffic through the tunnel (tunnel mode)\n"
         "  --log-level LEVEL     error | warn | info | debug\n"
+        "  --protocol v1|v2      v2 = Noise IK + AEAD (needs --server-pub and a client key)\n"
+        "  --server-pub B64      node public key (on the node: vpn_server --pubkey /etc/cppvpn/node.key)\n"
+        "  --key FILE            client key file (default client.key)\n"
+        "  --gen-key FILE        create a client key, print its public key (for allowed_clients)\n"
+        "  --pubkey FILE         print the public key of a client key file\n"
+        "  --rekey-after SEC     v2 rekey interval (default 120)\n"
         "  -h, --help            Show this help\n";
 }
 
@@ -774,6 +797,20 @@ int main(int argc, char *argv[])
         else if (a == "--probe")                      { cfg.probe = true; }
         else if (a == "--duration" && i + 1 < argc)   { cfg.probe_duration = std::stoi(argv[++i]); }
         else if (a == "--route-all")                  { cfg.route_all_traffic = true; }
+        else if (a == "--protocol" && i + 1 < argc)   { cfg.protocol = argv[++i]; }
+        else if (a == "--server-pub" && i + 1 < argc) { cfg.server_pub = argv[++i]; }
+        else if (a == "--key" && i + 1 < argc)        { cfg.client_key = argv[++i]; }
+        else if (a == "--rekey-after" && i + 1 < argc){ cfg.rekey_after = std::stoi(argv[++i]); }
+        else if (a == "--gen-key" && i + 1 < argc)    { return (sodium_init() >= 0 && v2GenKey(argv[i + 1])) ? 0 : 1; }
+        else if (a == "--pubkey" && i + 1 < argc)
+        {
+            uint8_t sk[32], pk[32];
+            if (sodium_init() < 0 || !v2LoadKey(argv[i + 1], sk)) return 1;
+            crypto_scalarmult_base(pk, sk);
+            sodium_memzero(sk, sizeof(sk));
+            std::printf("%s\n", crypto::toBase64Url(pk, sizeof(pk)).c_str());
+            return 0;
+        }
         else if (a == "--log-level" && i + 1 < argc)
         {
             std::string v = argv[++i];
@@ -785,7 +822,14 @@ int main(int argc, char *argv[])
     }
 
     log_init(cfg);
-    LOG_I("Cpp-VPN-Core Windows test client (protocol v1), mode=%s", cfg.probe ? "probe" : "tunnel");
+    if (cfg.protocol != "v1" && cfg.protocol != "v2")
+    {
+        LOG_E("protocol must be v1 or v2");
+        return 1;
+    }
+    const bool v2 = cfg.protocol == "v2";
+    LOG_I("Cpp-VPN-Core Windows test client (protocol %s%s), mode=%s", cfg.protocol.c_str(),
+          v2 ? ", Noise IK + AEAD" : ", XOR - insecure", cfg.probe ? "probe" : "tunnel");
     LOG_I("Server: %s:%d", cfg.server.c_str(), cfg.port);
 
     // ---- Winsock init ----
@@ -794,7 +838,7 @@ int main(int argc, char *argv[])
 
     if (cfg.probe)
     {
-        int rc = runProbe(cfg);
+        int rc = v2 ? runProbeV2(cfg) : runProbe(cfg);
         WSACleanup();
         log_shutdown();
         return rc;
@@ -840,7 +884,25 @@ int main(int argc, char *argv[])
         uint32_t session_id = 0;
         char     assigned_ip[INET_ADDRSTRLEN]{};
 
-        if (!performHandshake(sock, server, xor_key, session_id, assigned_ip))
+        std::unique_ptr<v2::Client> v2c;
+        bool handshake_ok;
+        if (v2)
+        {
+            v2::ClientConfig cc;
+            if (!v2MakeClientConfig(cfg, cc))
+            {
+                closesocket(sock);
+                break;
+            }
+            v2c = std::make_unique<v2::Client>(cc);
+            handshake_ok = v2Handshake(sock, server, *v2c);
+            if (handshake_ok)
+                std::snprintf(assigned_ip, sizeof(assigned_ip), "%s", v2Ip(v2c->tunIp()).c_str());
+        }
+        else
+            handshake_ok = performHandshake(sock, server, xor_key, session_id, assigned_ip);
+
+        if (!handshake_ok)
         {
             LOG_E("Handshake failed");
             closesocket(sock);
@@ -884,11 +946,18 @@ int main(int argc, char *argv[])
         setupRoutes(adapter, assigned_ip, cfg);
 
         // ---- Run tunnel ----
-        int tunnel_result = runTunnel(sock, server, wintun_session,
-                                       xor_key, session_id, cfg);
+        int tunnel_result = v2 ? runTunnelV2(sock, server, wintun_session, *v2c, cfg)
+                               : runTunnel(sock, server, wintun_session, xor_key, session_id, cfg);
 
         // ---- Cleanup this session ----
-        sendBye(sock, server, session_id);
+        if (v2)
+        {
+            uint8_t bye[64];
+            v2Send(sock, server, bye, v2c->sealBye(v2NowMs(), bye));
+            LOG_I("Sent BYE to server");
+        }
+        else
+            sendBye(sock, server, session_id);
         teardownRoutes(assigned_ip);
         removeDns();
         pEndSession(wintun_session);

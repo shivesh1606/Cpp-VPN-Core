@@ -5,25 +5,27 @@
 | **Status** | Accepted (2026-11-08). Implemented through rollout step 2, plus step 4 (OpenSSL), in milestones M1–M2 ([plan](../plan/implementation-plan.md)). On the wire from M4. |
 | **Scope** | Per-packet encryption of tunnel traffic (server engine + Android client) |
 | **Depends on** | [02 — Handshake](README.md#index) (provides the session keys) |
-| **Replaces** | `XorCipher` single-byte XOR ([crypto/XorCipher.cpp](../../crypto/XorCipher.cpp)) |
+| **Replaces** | `XorCipher` single-byte XOR ([crypto/XorCipher.cpp @ 76f900c](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp); removed in M1, now `XorBackend` for protocol v1 only) |
 
 ---
 
-## 1. Context: current implementation
+## 1. Context: implementation before this design (`master` @ `76f900c`)
+
+Links in this section point to that commit. Since M1, the XOR cipher sits behind `SessionLock` as [XorBackend](../../crypto/backends/XorBackend.h); protocol v1 on the wire is unchanged until M4.
 
 | Aspect | Current code | Problem |
 |---|---|---|
-| Cipher | `result[i] = data[i] ^ xorkey` ([crypto/XorCipher.cpp:5-6](../../crypto/XorCipher.cpp#L5-L6)) | 1-byte key, 256-value keyspace. Brute-forced by testing for an IPv4 first byte `0x45`. |
-| Key | `uint8_t xor_key` per client ([sessions/client/Client_Manager.h:24](../../sessions/client/Client_Manager.h#L24)) | Derived from DH with `P=127` ([crypto/DiffieHellman.h:7-8](../../crypto/DiffieHellman.h#L7-L8)) |
-| Integrity | None | Forged or modified packets are accepted. A spoofed `PKT_DATA` carrying a guessed `session_id` triggers roaming ([main.cpp:49-60](../../main.cpp#L49-L60)) and redirects the victim's downstream traffic. |
-| Call sites | decrypt [main.cpp:75](../../main.cpp#L75), encrypt [main.cpp:449](../../main.cpp#L449) | Hard-wired to the singleton `XorCipher::getInstance()` |
+| Cipher | `result[i] = data[i] ^ xorkey` ([crypto/XorCipher.cpp:5-6](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp#L5-L6)) | 1-byte key, 256-value keyspace. Brute-forced by testing for an IPv4 first byte `0x45`. |
+| Key | `uint8_t xor_key` per client ([sessions/client/Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24)) | Derived from DH with `P=127` ([crypto/DiffieHellman.h:7-8](../../crypto/DiffieHellman.h#L7-L8)) |
+| Integrity | None | Forged or modified packets are accepted. A spoofed `PKT_DATA` carrying a guessed `session_id` triggers roaming ([main.cpp:49-60](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L49-L60); still true on v1 today, at [main.cpp:50-61](../../main.cpp#L50-L61)) and redirects the victim's downstream traffic. |
+| Call sites | decrypt [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75), encrypt [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | Hard-wired to the singleton `XorCipher::getInstance()` |
 
 ## 2. Decision
 
 Replace XOR with an **AEAD** transport cipher behind an interface with three levels of selection:
 
 ```
-compile time   CMake: WITH_LIBSODIUM=ON (mandatory), WITH_OPENSSL=ON (optional), ...
+compile time   CMake: libsodium (always, required), WITH_OPENSSL=ON (optional), ...
                  → which implementations EXIST in the binary (a single binary may hold several)
 startup        node.conf: implementation chosen per algorithm
                  → which library runs (no rebuild)
@@ -140,16 +142,16 @@ Wire cost: 16-byte tag per packet, plus the v2 header (14 B, up from 5 B). Inner
 
 ## 4. Code change map
 
-| Area | Current | Change |
-|---|---|---|
-| Cipher class | [crypto/XorCipher.h](../../crypto/XorCipher.h), [crypto/XorCipher.cpp](../../crypto/XorCipher.cpp) | Becomes `XorBackend` (id 0). Add `crypto/SessionLock.h`, `crypto/CipherRegistry.{h,cpp}`, `crypto/backends/*` |
-| Client state | `uint8_t xor_key` ([Client_Manager.h:24](../../sessions/client/Client_Manager.h#L24)) | `std::unique_ptr<SessionLock> rx, tx; uint64_t tx_counter; ReplayWindow rx_window;` |
-| RX path | `enc.crypt(...)` [main.cpp:75](../../main.cpp#L75) | `client->rx->open(...)`; on `false`, drop and count `auth_fail` |
-| TX path | `enc.crypt(...)` [main.cpp:449](../../main.cpp#L449) | `client->tx->seal(client->tx_counter++, ...)` |
-| Build | [CMakeLists.txt:37-53](../../CMakeLists.txt#L37-L53) | `WITH_LIBSODIUM` (required, static link), `WITH_OPENSSL` (optional); new `crypto_bench` target |
-| Docker | [Dockerfile:3-7](../../Dockerfile#L3-L7) | `apt-get install libsodium-dev` (static `libsodium.a`), optionally `libssl-dev` |
-| Stats | `enc_cycles`/`dec_cycles` ([utils/counter_definition.h:62-63](../../utils/counter_definition.h#L62-L63)) | Unchanged; works for any backend. Add an `auth_fail` counter. |
-| Android | XOR in `MyVpnService.kt` | Kotlin `SessionLock` interface; default implementation on [Lazysodium][lazysodium] |
+| Area | Before (`76f900c`) | Change | Status |
+|---|---|---|---|
+| Cipher class | [crypto/XorCipher.h](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.h), [crypto/XorCipher.cpp](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp) | Becomes `XorBackend` (id 0). Add `crypto/SessionLock.h`, `crypto/CipherRegistry.{h,cpp}`, `crypto/backends/*` | Done (M1, M2) |
+| Client state | `uint8_t xor_key` ([Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24)) | `std::unique_ptr<SessionLock> rx, tx; uint64_t tx_counter; ReplayWindow rx_window;` | Locks and counter done in M1 ([Client_Manager.h](../../sessions/client/Client_Manager.h)); replay window in M4 |
+| RX path | `enc.crypt(...)` [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75) | `client->rx->open(...)`; on `false`, drop and count `auth_fail` | Done (M1): [main.cpp:84](../../main.cpp#L84), counter `rx_auth_fail` |
+| TX path | `enc.crypt(...)` [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | `client->tx->seal(client->tx_counter++, ...)` | Done (M1): [main.cpp:495](../../main.cpp#L495) |
+| Build | [CMakeLists.txt:37-53](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/CMakeLists.txt#L37-L53) | libsodium required (static link), `WITH_OPENSSL` (optional); new `crypto_bench` target | Done (M2). libsodium is unconditional; there is no `WITH_LIBSODIUM` switch |
+| Docker | [Dockerfile:3-7](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/Dockerfile#L3-L7) | `apt-get install libsodium-dev` (static `libsodium.a`), optionally `libssl-dev` | Done (M2). Both installed; image built with `-DWITH_OPENSSL=ON` |
+| Stats | `enc_cycles`/`dec_cycles` ([utils/counter_definition.h:62-63](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/utils/counter_definition.h#L62-L63)) | Unchanged; works for any backend. Add an `auth_fail` counter. | Done (M1): `rx_auth_fail`, `udp_rx_truncated` |
+| Android | XOR in `MyVpnService.kt` | Kotlin `SessionLock` interface; default implementation on [Lazysodium][lazysodium] | M6 |
 
 ## 5. Benchmark plan
 

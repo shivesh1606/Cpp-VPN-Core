@@ -52,7 +52,7 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 * **Language:** C++17 (Focus on performance and RAII)
 * **Build System:** CMake (With modular profiling toggles)
 * **Network Interfaces:** Linux TUN/TAP, UDP Sockets
-* **Cryptography:** Diffie-Hellman Key Exchange, Custom XOR Stream Cipher
+* **Cryptography:** Diffie-Hellman key exchange and XOR stream cipher (protocol v1 placeholders); pluggable AEAD cipher layer with libsodium and OpenSSL backends (ChaCha20-Poly1305, AES-256-GCM), on the wire with protocol v2
 * **System Utilities:** `recvmmsg`, `sendmmsg`, `fcntl`, `ioctl`
 
 ---
@@ -63,12 +63,12 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 
 Target designs and their rationale are in [docs/design/](docs/design/README.md):
 
-| # | Document | Status |
-|---|---|---|
-| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted |
-| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted |
-| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted |
-| 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked |
+| # | Document | Status | Implementation |
+|---|---|---|---|
+| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted | M1–M2 done; on the wire in M4 |
+| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted | M4 |
+| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted | M5 |
+| 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked | 4a in M3 |
 
 - **Plan:** [implementation plan](docs/plan/implementation-plan.md) (milestones M0–M7) · [parked discussions](docs/plan/parked-discussions.md)
 - **Measurements:** [experiments/](experiments/README.md): [001: per-packet crypto cost](experiments/001-crypto-per-packet-cost/README.md) · [002: `crypto_bench`, all backends](experiments/002-crypto-bench-backends/README.md)

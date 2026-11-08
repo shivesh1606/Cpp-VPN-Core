@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-11-08 |
-| **Status** | Done on a dev laptop (x86, AVX-512). **Pending:** GCP e2-micro (x86 shared core) and Oracle A1 (arm64). Recipe below. |
+| **Status** | Done on a dev laptop (x86, AVX-512). **Deferred (2026-11-08):** GCP e2-micro (x86 shared core) and Oracle A1 (arm64). Recipe below. |
 | **Informs** | [Design 01 §5](../../docs/design/01-cipher-layer.md#5-benchmark-plan); default `impl.*` choices for `node.conf` (plan M3) |
 | **Follows** | [001](../001-crypto-per-packet-cost/README.md) (standalone libsodium micro-benchmark, before any engine change) |
 
@@ -96,9 +96,9 @@ bash experiments/002-crypto-bench-backends/run.sh \
 - **WSL2 without root (as here):** unpack `libsodium-dev` with `apt-get download` + `dpkg -x` and pass `PREFIX=<dir>/usr`.
 - **e2-micro:** a shared-core VM with burst credits. Run `COUNT=200000` a few times and keep all files; expect a large spread.
 
-## Pending
+## Deferred runs
 
 | Host | Why it matters | Status |
 |---|---|---|
-| GCP e2-micro (x86, shared core) | Current production node | Needs a run on the VM |
-| Oracle A1 (Ampere Altra, arm64) | Free tier with 10 TB egress (parked P1). libsodium 1.0.18 has no ARM AES-GCM, so only OpenSSL AES and both ChaCha implementations register. | Needs a VM. Correctness was checked under QEMU emulation (Ubuntu 24.04 arm64): 69/69 tests pass, and the registered backends are chacha20poly1305 (libsodium, openssl), aes256gcm (openssl) and xor. Emulated timings are meaningless and are not recorded. |
+| GCP e2-micro (x86, shared core) | Current production node | Deferred; run the recipe on the VM |
+| Oracle A1 (Ampere Altra, arm64) | Free tier with 10 TB egress (parked P1). libsodium 1.0.18 has no ARM AES-GCM, so only OpenSSL AES and both ChaCha implementations register. | Deferred. Correctness was checked under QEMU emulation (Ubuntu 24.04 arm64): 69/69 tests pass, and the registered backends are chacha20poly1305 (libsodium, openssl), aes256gcm (openssl) and xor. Emulated timings are meaningless and are not recorded. |

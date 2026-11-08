@@ -20,7 +20,8 @@ I welcome in-depth peer reviews regarding the system's core logic, such as the `
 If you wish to submit a patch or a new feature:
 1. **Fork** the repository and create your branch from `master`.
 2. Ensure your code adheres to the **Technical Standards** listed below.
-3. Submit a Pull Request with a detailed description of the changes and their impact on performance or stability.
+3. Add or update **GoogleTest** unit tests under [`tests/`](tests/README.md), mirroring the source tree. `ctest` must pass; the Docker build runs it, so a failing test fails the image build. Changes to a cipher backend must pass the known-answer tests (design 01 C5). Changes on the hot path should re-run [`crypto_bench`](experiments/002-crypto-bench-backends/README.md) or the relevant experiment.
+4. Submit a Pull Request with a detailed description of the changes and their impact on performance or stability.
 
 ---
 

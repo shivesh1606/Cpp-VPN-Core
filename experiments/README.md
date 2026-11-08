@@ -17,7 +17,7 @@ Measurements that inform design decisions. Design docs ([docs/design/](../docs/d
 | # | Experiment | Question | Status | Used by |
 |---|---|---|---|---|
 | 001 | [Per-packet crypto cost](001-crypto-per-packet-cost/README.md) | How much time does replacing XOR with AEAD add per data packet? | Done on a dev laptop; superseded for target nodes by 002 | [Design 01 §5.1](../docs/design/01-cipher-layer.md) |
-| 002 | [`crypto_bench`: every backend](002-crypto-bench-backends/README.md) | Which library is fastest per algorithm, through the engine's real `SessionLock` code? | Done on a dev laptop; GCP e2-micro and Oracle A1 runs pending | [Design 01 §5](../docs/design/01-cipher-layer.md#5-benchmark-plan), M3 `impl.*` defaults |
+| 002 | [`crypto_bench`: every backend](002-crypto-bench-backends/README.md) | Which library is fastest per algorithm, through the engine's real `SessionLock` code? | Done on a dev laptop; GCP e2-micro and Oracle A1 runs deferred | [Design 01 §5](../docs/design/01-cipher-layer.md#5-benchmark-plan), M3 `impl.*` defaults |
 
 ## Planned
 

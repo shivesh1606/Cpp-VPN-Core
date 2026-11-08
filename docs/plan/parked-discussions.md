@@ -31,7 +31,7 @@ Context gathered so far:
   - Oracle Always Free includes about 10 TB/month on Ampere A1 (arm64), but only in the home region, and idle instances may be reclaimed.
 - **Open questions:**
   - provider mix;
-  - arm64 CI (QEMU or native runners);
+  - arm64 CI (QEMU or native runners). Finding from M2 (2026-11-08): under Docker Desktop's QEMU, Ubuntu 22.04 arm64 crashes in `ldconfig` while installing packages. Ubuntu 24.04 arm64 works (69/69 tests). So QEMU CI needs a 24.04 base, or native arm64 runners;
   - the registry's home (vpnctl file in Phase 0, issuer DB in Phase 1);
   - how bundles learn about new nodes.
 

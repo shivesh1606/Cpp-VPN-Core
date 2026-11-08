@@ -13,22 +13,22 @@ Primary sources (RFCs, specs, official docs) come first. Books and blogs are mar
 ## 1. Current engine in 5 minutes (protocol v1, `master`)
 
 ```
-                     ┌──────────────────────────── main() main.cpp:244 ────────────────────────────┐
+                     ┌──────────────────────────── main() main.cpp:264 ────────────────────────────┐
                      │ setup: TunDevice::create("tun0")  SocketManager::createUdpSocket(5555)      │
                      │        ClientManager cm(100, "10.8.0.2")  → IP pool 10.8.0.2 … 10.8.0.101   │
                      │                                                                             │
-                     │ loop  main.cpp:305  select(sock, tun, 1 s timeout)                          │
+                     │ loop  main.cpp:332  select(sock, tun, 1 s timeout)                          │
                      │   ├─ every second: stats, expire pending handshakes (10 s), sweep dead (60 s)│
-                     │   ├─ UDP readable → recvmmsg ×8  main.cpp:357                               │
-                     │   │     type == DATA → handleUdpToTun   main.cpp:38                          │
+                     │   ├─ UDP readable → recvmmsg ×8  main.cpp:384                               │
+                     │   │     type == DATA → handleUdpToTun   main.cpp:40                          │
                      │   │                     lookup by ip:port, else by session_id (roaming)      │
-                     │   │                     XOR-decrypt → write(tun)                             │
-                     │   │     otherwise    → handleHandshake  main.cpp:98                          │
+                     │   │                     rx->open() (XorLock on v1) → write(tun)              │
+                     │   │     otherwise    → handleHandshake  main.cpp:107                         │
                      │   │                     HELLO → reserve IP, DH, WELCOME                      │
                      │   │                     ACK   → ClientManager::addClient                     │
                      │   │                     BYE / KEEPALIVE → remove / touch                     │
-                     │   └─ TUN readable → read() → dst IP → client → XOR-encrypt → sendmmsg ×3     │
-                     │                     main.cpp:417 … 468                                      │
+                     │   └─ TUN readable → read() → dst IP → client → tx->seal() → sendmmsg ×3      │
+                     │                     main.cpp:451 … 548                                      │
                      └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,7 +38,9 @@ Primary sources (RFCs, specs, official docs) come first. Books and blogs are mar
 | Wire format v1 | [protocol/Handshake.h](../protocol/Handshake.h) | `PacketHeader` (5 B), packet structs |
 | Connected clients, IP pool, roaming | [sessions/client/Client_Manager.h](../sessions/client/Client_Manager.h), [.cpp](../sessions/client/Client_Manager.cpp) | The three maps, `freeIp`, `updateClientEndpoint`, `sweepDeadClients` |
 | Pending handshakes | [sessions/session/ClientSession.h](../sessions/session/ClientSession.h), [.cpp](../sessions/session/ClientSession.cpp) | `SessionState`, `eraseExpiredSessions` |
-| Crypto (placeholder) | [crypto/DiffieHellman.h](../crypto/DiffieHellman.h), [crypto/XorCipher.cpp](../crypto/XorCipher.cpp) | Why it's insecure: design 01 §1 |
+| Key exchange (placeholder) | [crypto/DiffieHellman.h](../crypto/DiffieHellman.h) | `P=127` toy DH; why it's insecure: design 01 §1, design 02 |
+| Cipher layer (pluggable) | [crypto/SessionLock.h](../crypto/SessionLock.h), [crypto/CipherRegistry.cpp](../crypto/CipherRegistry.cpp), [crypto/backends/](../crypto/backends/) | `SessionLock::seal/open`, registry order, `XorBackend` (the v1 wire; insecure), and `AeadLock<P>` with the libsodium and OpenSSL primitives (built and tested; on the wire from M4). Design 01 §2.2 |
+| Tests and benchmark | [tests/README.md](../tests/README.md), [tools/crypto_bench.cpp](../tools/crypto_bench.cpp) | GoogleTest layout and KATs; `crypto_bench` (experiment 002) |
 | TUN device | [net/tun/TunDevice.cpp](../net/tun/TunDevice.cpp) | `IFF_TUN | IFF_NO_PI`, `TUNSETIFF` |
 | Stats and profiling | [utils/counter_definition.h](../utils/counter_definition.h), [utils/profiling.h](../utils/profiling.h) | `print_Stats`, `PROFILE_SCOPE_*`, `RDTSC()` |
 | Logger | [utils/logger.cpp](../utils/logger.cpp) | 64 KB buffer, flushed by the stats print |

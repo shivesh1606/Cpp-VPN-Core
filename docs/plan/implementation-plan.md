@@ -28,7 +28,7 @@ M3 Node config & identity ────┴─────────────
 |---|---|---|---|
 | M0 | Windows test client (protocol v1) | **Done** (branch `feature/windows-test-client`) | — |
 | M1 | Cipher-layer refactor, no wire change, plus hardening fixes H1–H2 | **In review** (branch `feature/m1-cipher-layer`) | — |
-| M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | **In review** (branch `feature/m2-libsodium`); experiment 002 target-node runs pending | M1 |
+| M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | **In review** (branch `feature/m2-libsodium`); experiment 002 target-node runs deferred (2026-11-08) | M1 |
 | M3 | Node config file and node identity key | Not started; decisions N1–N5 accepted 2026-11-08 | — |
 | M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | Not started | M2, M3 |
 | M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | Not started | M4 |
@@ -61,10 +61,10 @@ Design 01 §2.2, §4, rollout step 1.
 |---|---|
 | `SessionLock`, `CipherBackend`, `CipherRegistry` interfaces | new `crypto/SessionLock.h`, `crypto/CipherRegistry.{h,cpp}` |
 | `XorBackend` (id 0) wrapping today's XOR; v1 key byte expands to a 32-byte key | `crypto/backends/XorBackend.{h,cpp}`; remove `XorCipher` singleton |
-| Client state: `uint8_t xor_key` → `std::unique_ptr<SessionLock> rx, tx` | [sessions/client/Client_Manager.h:24](../../sessions/client/Client_Manager.h#L24), `addClient` |
-| Call sites → `open()`/`seal()` | [main.cpp:75](../../main.cpp#L75), [main.cpp:449](../../main.cpp#L449) |
-| **H1:** TUN read: require `n ≥ 20` before reading the IPv4 destination | [main.cpp:434-436](../../main.cpp#L434-L436) |
-| **H2:** detect truncated datagrams (`MSG_TRUNC` in `msg_flags`) and count them as drops | [main.cpp:366-377](../../main.cpp#L366-L377) |
+| Client state: `uint8_t xor_key` → `std::unique_ptr<SessionLock> rx, tx` | [sessions/client/Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24), `addClient` |
+| Call sites → `open()`/`seal()` | [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75), [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) |
+| **H1:** TUN read: require `n ≥ 20` before reading the IPv4 destination | [main.cpp:434-436](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L434-L436) |
+| **H2:** detect truncated datagrams (`MSG_TRUNC` in `msg_flags`) and count them as drops | [main.cpp:366-377](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L366-L377) |
 | Test scaffold: `tests/` + CTest; XOR backend round-trip test | `CMakeLists.txt`, `tests/` |
 
 **Acceptance**
@@ -94,7 +94,7 @@ Design 01 §2.1, C5, §5; rollout step 2.
 
 | Task | Notes |
 |---|---|
-| `WITH_LIBSODIUM` (required) in CMake; static `libsodium.a` | [Dockerfile:3-7](../../Dockerfile#L3-L7): add `libsodium-dev` |
+| libsodium (required, no switch) in CMake; static `libsodium.a` | [Dockerfile:3-7](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/Dockerfile#L3-L7): add `libsodium-dev` |
 | `SodiumChaCha20Poly1305` backend (id 1), plus `SodiumAes256Gcm` (id 2, runtime-gated by `crypto_aead_aes256gcm_is_available()`) | design 01 §2.1 |
 | KAT tests: RFC 8439 §2.8.2; NIST GCM vectors; cross-backend seal/open | design 01 C5 |
 | `crypto_bench` target, grown from [experiments/001/pkt_bench.c](../../experiments/001-crypto-per-packet-cost/pkt_bench.c), iterating the registry | design 01 §5 |
@@ -121,7 +121,7 @@ Design 01 §2.1, C5, §5; rollout step 2.
   - **Release builds are `-O3`:** CMake appends `-O3` to the project's `-O2`, so the Docker image's XOR is vectorized. Experiment 001's `-O2` XOR baseline matches `scripts/runbuild.sh` builds, not the Docker image.
   - **Dirty upper vector state:** after OpenSSL's AVX code, libsodium's AES-NI code ran 1.7× slower. Fixed in the engine: the OpenSSL backend issues `vzeroupper` after each call ([VectorState.h](../../crypto/backends/VectorState.h)).
 - **Not done:**
-  - **GCP e2-micro and Oracle A1 runs:** these need access to those machines. The run recipe is in the experiment README.
+  - **GCP e2-micro and Oracle A1 runs:** deferred by decision (2026-11-08). The run recipe is in the experiment README.
   - **arm64 performance:** no numbers yet. Correctness was checked under QEMU emulation: Ubuntu 24.04 arm64, libsodium 1.0.18, OpenSSL 3.0.13, 69/69 tests pass. libsodium AES-256-GCM is correctly not registered; OpenSSL AES-256-GCM passes the KATs and the cross-implementation test. Ubuntu 22.04 arm64 could not be checked: its `ldconfig` crashes under Docker Desktop's QEMU while apt installs, before any of our code runs.
 
 ## M3 — Node config file and node identity
@@ -130,7 +130,7 @@ Decisions N1–N5 below (Discussion 4a). Design 01 §2.3, design 02 §7, design 
 
 | Task | Notes |
 |---|---|
-| INI parser plus `NodeConfig` struct; `--config PATH` (default `/etc/cppvpn/node.conf`) | replaces hardcoded port, pool and timeouts at [main.cpp:256-267](../../main.cpp#L256-L267) |
+| INI parser plus `NodeConfig` struct; `--config PATH` (default `/etc/cppvpn/node.conf`) | replaces hardcoded port, pool and timeouts at [main.cpp:276-294](../../main.cpp#L276-L294) |
 | `vpn_server --gen-key PATH`: writes the X25519 private key (mode 0600) and prints `S_pub` (base64url) | N1 |
 | On start: load the key and refuse to run if it's missing | N1 |
 | Server assigns the `tun0` address from `tun_cidr`; pool derived from it | N5 |
@@ -213,7 +213,7 @@ Design 03.
 | N2 | Config format | INI `key = value` with sections, a ~100-line parser, no dependency. Same style as the Windows client config. | TOML/JSON library (extra dependency) |
 | N3 | Location and precedence | `/etc/cppvpn/node.conf`, `--config` override; defaults < file < CLI; secrets in separate files referenced by path (`node_key = /etc/cppvpn/node.key`, mode 0600) | Environment variables |
 | N4 | Config reload | Restart only for now. Clients re-handshake in about 5 s. The revocation list hot-reloads independently through its fetcher. | `SIGHUP` live reload (parked P9) |
-| N5 | Who configures `tun0` | The server sets the address/netmask and brings the link up via `ioctl` from `tun_cidr = 10.8.0.1/24`, and derives the pool from it. NAT (MASQUERADE) stays in deployment (P1). | Keep it external, as today (address set by deploy scripts outside this repo; pool hardcoded separately at [main.cpp:256](../../main.cpp#L256), so the two can mismatch) |
+| N5 | Who configures `tun0` | The server sets the address/netmask and brings the link up via `ioctl` from `tun_cidr = 10.8.0.1/24`, and derives the pool from it. NAT (MASQUERADE) stays in deployment (P1). | Keep it external, as today (address set by deploy scripts outside this repo; pool hardcoded separately at [main.cpp:276](../../main.cpp#L276), so the two can mismatch) |
 
 Proposed `node.conf`:
 

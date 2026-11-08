@@ -18,8 +18,16 @@ ClientManager::~ClientManager()
     LOG(LOG_INFO, "[+] ClientManager destroyed, cleaning up %zu clients", vpn_to_client.size());
 }
 
-Client *ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp, uint8_t &xor_key, uint32_t session_id)
+Client *ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,
+                                 std::unique_ptr<crypto::SessionLock> rx,
+                                 std::unique_ptr<crypto::SessionLock> tx,
+                                 uint32_t session_id)
 {
+    if (!rx || !tx)
+    {
+        LOG(LOG_ERROR, "[ERROR] addClient called without session locks");
+        return nullptr;
+    }
 
     bool ipisActive = isIpInStateActive(androidTunIp);
     if (ipisActive)
@@ -31,12 +39,17 @@ Client *ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t andr
     Client newClient;
     newClient.client_udp_addr = clientUdpAddr;
     newClient.android_client_tun_ip = androidTunIp;
-    newClient.xor_key = xor_key;
+    newClient.rx = std::move(rx);
+    newClient.tx = std::move(tx);
     newClient.session_id = session_id;
     newClient.last_seen = time(nullptr);
 
-    makeIpInUse(androidTunIp); // ← THIS is where IP becomes ACTIVE
-    auto [it, inserted] = vpn_to_client.emplace(androidTunIp, newClient);
+    if (!makeIpInUse(androidTunIp)) // ← THIS is where IP becomes ACTIVE
+    {
+        LOG(LOG_ERROR, "[ERROR] addClient: IP outside the pool");
+        return nullptr;
+    }
+    auto [it, inserted] = vpn_to_client.emplace(androidTunIp, std::move(newClient));
 
     if (!inserted)
     {
@@ -44,7 +57,7 @@ Client *ClientManager::addClient(const sockaddr_in &clientUdpAddr, uint32_t andr
         freeIp(androidTunIp); // Rollback IP usage
         return nullptr;
     }
-    session_to_vpn_ip[newClient.session_id] = androidTunIp;
+    session_to_vpn_ip[session_id] = androidTunIp;
     uint64_t packedAddr = packAddr(clientUdpAddr);
     udp_to_vpn_ip[packedAddr] = androidTunIp;
     return &it->second;

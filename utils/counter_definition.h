@@ -41,6 +41,9 @@ struct Stats
     uint64_t tun_read_eagain = 0;
     uint64_t udp_recv_eagain = 0;
 
+    uint64_t rx_auth_fail = 0;      // SessionLock::open() rejected the packet (forged/corrupt)
+    uint64_t udp_rx_truncated = 0;  // datagram larger than the RX buffer (MSG_TRUNC)
+
     // ============================================================
     // Batching (ALWAYS ENABLED)
     // ============================================================
@@ -113,6 +116,7 @@ struct Stats
         tun_rx_drops = udp_tx_drops = udp_rx_drops = 0;
 
         tun_read_eagain = udp_recv_eagain = 0;
+        rx_auth_fail = udp_rx_truncated = 0;
 
         udp_rx_batches = udp_tx_batches = 0;
 
@@ -218,6 +222,7 @@ struct Stats
             "Handshake pkts: %lu, failures: %lu\n"
             "Drops - TUN RX: %lu, UDP TX: %lu, UDP RX: %lu\n"
             "EAGAIN - TUN read: %lu, UDP recv: %lu\n"
+            "RX auth failures: %lu, UDP RX truncated: %lu\n"
             "UDP RX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n"
             "UDP TX batches: %lu, avg pkts/batch: %.2f (max avg: %.2f)\n",
             delta,
@@ -228,6 +233,7 @@ struct Stats
             handshake_pkts, handshake_failures,
             tun_rx_drops, udp_tx_drops, udp_rx_drops,
             tun_read_eagain, udp_recv_eagain,
+            rx_auth_fail, udp_rx_truncated,
             udp_rx_batches, avg_pkts_per_rx_batch, max_avg_pkts_per_rx_batch,
             udp_tx_batches, avg_pkts_per_tx_batch, max_avg_pkts_per_tx_batch);
 

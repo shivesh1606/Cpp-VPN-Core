@@ -34,15 +34,15 @@ configure_file(
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "-Wall -Wextra -O2")
 
-add_executable(vpn_server
-    main.cpp
-
+# ---------------- Engine library (shared by vpn_server and unit tests) ----------------
+add_library(vpn_core STATIC
     net/tun/TunDevice.cpp
     net/socket/SocketManager.cpp
     sessions/client/Client_Manager.cpp
     sessions/session/ClientSession.cpp
 
-    crypto/XorCipher.cpp
+    crypto/CipherRegistry.cpp
+    crypto/backends/XorBackend.cpp
     crypto/DiffieHellman.cpp
     crypto/KeyDerivation.cpp
 
@@ -51,18 +51,29 @@ add_executable(vpn_server
     utils/counter_definition.cpp
     utils/logger.cpp
 )
+
 option(ENABLE_PROFILING "Enable profiling instrumentation" OFF)
 
 if(ENABLE_PROFILING)
-    target_compile_definitions(vpn_server PRIVATE ENABLE_PROFILING=1)
+    target_compile_definitions(vpn_core PUBLIC ENABLE_PROFILING=1)
 else()
-    target_compile_definitions(vpn_server PRIVATE ENABLE_PROFILING=0)
+    target_compile_definitions(vpn_core PUBLIC ENABLE_PROFILING=0)
 endif()
 
-target_include_directories(vpn_server PRIVATE 
-    . 
+target_include_directories(vpn_core PUBLIC
+    .
     ${CMAKE_BINARY_DIR}/generated
 )
+
+# ---------------- Server ----------------
+add_executable(vpn_server main.cpp)
+target_link_libraries(vpn_server PRIVATE vpn_core)
+
+# ---------------- Unit tests (GoogleTest, run with ctest) ----------------
+include(CTest)   # defines BUILD_TESTING (default ON)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 
 # ---------------- LD_PRELOAD shared library ----------------
 # add_library(perf_hook_full SHARED

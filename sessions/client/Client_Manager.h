@@ -5,6 +5,9 @@
 #include <vector>
 #include <ctime>
 #include <arpa/inet.h>
+#include <memory>
+
+#include "crypto/SessionLock.h"
 
 /**
  * @brief Represents a connected VPN client.
@@ -21,7 +24,9 @@ struct Client
 {
     sockaddr_in client_udp_addr;    ///< Actual (public) UDP address of client
     uint32_t android_client_tun_ip; ///< Fixed IP inside Android TUN (10.8.0.2)
-    uint8_t xor_key;                ///< Simple XOR key for this client
+    std::unique_ptr<crypto::SessionLock> rx; ///< Decrypts client -> server (design 01: k_c2s)
+    std::unique_ptr<crypto::SessionLock> tx; ///< Encrypts server -> client (design 01: k_s2c)
+    uint64_t tx_counter = 0;        ///< Next send counter (nonce); unused by v1 XOR
     uint32_t session_id;            ///< Persistent ID for roaming support
     time_t last_seen;               ///< Last time we got any packet from this client
 };
@@ -123,7 +128,8 @@ public:
      *
      * @param clientUdpAddr     Public UDP address of client
      * @param androidTunIp      Client’s TUN IP (fixed - ex: 10.8.0.2)
-     * @param xor_key           XOR key for encrypting/decrypting this client
+     * @param rx                Lock for client -> server packets (ownership taken)
+     * @param tx                Lock for server -> client packets (ownership taken)
      * @param session_id        Persistent session ID for roaming support
      * Steps:
      *   1. Finds free IP from ipPool
@@ -132,10 +138,13 @@ public:
      *          vpn_to_client
      *          udp_to_vpn
      *
-     * @return uint32_t The server-assigned VPN IP
-     *                   (0 if pool exhausted)
+     * @return Client* The registered client, or nullptr if the IP is already active,
+     *                 out of the pool range, or either lock is null
      */
-    Client *addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp, uint8_t &xor_key, uint32_t session_id);
+    Client *addClient(const sockaddr_in &clientUdpAddr, uint32_t androidTunIp,
+                      std::unique_ptr<crypto::SessionLock> rx,
+                      std::unique_ptr<crypto::SessionLock> tx,
+                      uint32_t session_id);
     /**
      * @brief Removes a client using its server-assigned VPN IP.
      *

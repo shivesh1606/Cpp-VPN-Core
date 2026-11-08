@@ -12,6 +12,13 @@
 #include "crypto/DiffieHellman.h"
 #include "net/tun/TunDevice.h"
 #include "net/ip/Ipv4.h"
+#include "net/ip/Cidr.h"
+#include "config/Cli.h"
+#include "config/NodeConfig.h"
+#include "crypto/NodeIdentity.h"
+#include "version.h"
+#include <cstdio>
+#include <sstream>
 #include "crypto/CipherRegistry.h"
 #include "crypto/backends/XorBackend.h"
 #include "sessions/session/ClientSession.h"
@@ -261,9 +268,132 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         return;
     }
 }
-int main()
+// --gen-key / --pubkey / --check-config / --help / --version. Returns the exit code, or -1 to
+// continue into server mode. These modes need no root and touch neither TUN nor the network.
+static int runCliMode(const config::CliOptions &cli, const config::NodeConfig &cfg,
+                      const config::ConfigReport &report)
 {
+    switch (cli.mode)
+    {
+    case config::CliOptions::kHelp:
+        std::fputs(config::usageText(), stdout);
+        return 0;
+    case config::CliOptions::kVersion:
+        std::printf("vpn_server %d.%d (build %d)\n", PROJECT_VERSION_MAJOR, PROJECT_VERSION_MINOR,
+                    PROJECT_BUILD_NUMBER);
+        return 0;
+    case config::CliOptions::kGenKey:
+    {
+        crypto::NodeIdentity id;
+        std::string err;
+        if (!crypto::generateNodeKey(cli.key_path, cli.force, id, err))
+        {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr, "wrote %s (mode 0600). Public key (S_pub):\n", cli.key_path.c_str());
+        std::printf("%s\n", id.publicKeyBase64Url().c_str());
+        return 0;
+    }
+    case config::CliOptions::kPubKey:
+    {
+        crypto::NodeIdentity id;
+        std::string err;
+        if (!crypto::loadNodeKey(cli.key_path, id, err))
+        {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("%s\n", id.publicKeyBase64Url().c_str());
+        return 0;
+    }
+    case config::CliOptions::kCheckConfig:
+    {
+        for (const auto &w : report.warnings)
+            std::fprintf(stderr, "warning: %s\n", w.c_str());
+        for (const auto &e : report.errors)
+            std::fprintf(stderr, "error: %s\n", e.c_str());
+        if (!report.ok())
+            return 2;
+        std::fputs(config::describe(cfg).c_str(), stdout);
+        if (!cfg.node_key.empty())
+        {
+            crypto::NodeIdentity id;
+            std::string err;
+            if (!crypto::loadNodeKey(cfg.node_key, id, err))
+            {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                return 2;
+            }
+            std::printf("node public key   %s\n", id.publicKeyBase64Url().c_str());
+        }
+        std::printf("config OK\n");
+        return 0;
+    }
+    case config::CliOptions::kRun:
+        break;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv)
+{
+    // ---- command line and configuration (plan M3) ----
+    config::CliOptions cli;
+    std::string cli_error;
+    if (!config::parseCli(argc, argv, cli, cli_error))
+    {
+        std::fprintf(stderr, "error: %s\n\n%s", cli_error.c_str(), config::usageText());
+        return 2;
+    }
+    std::string config_path = cli.config_path;
+    if (!cli.config_given && access(config::kDefaultConfigPath, F_OK) == 0)
+        config_path = config::kDefaultConfigPath; // default location (N3), only if present
+    config::ConfigReport report;
+    const config::NodeConfig cfg = (cli.mode == config::CliOptions::kRun ||
+                                    cli.mode == config::CliOptions::kCheckConfig)
+                                       ? config::loadNodeConfig(config_path, cli.overrides, report)
+                                       : config::NodeConfig{};
+    const int cli_rc = runCliMode(cli, cfg, report);
+    if (cli_rc >= 0)
+        return cli_rc;
+
     log_init();
+    for (const auto &w : report.warnings)
+        LOG(LOG_WARN, "config: %s", w.c_str());
+    if (!report.ok())
+    {
+        for (const auto &e : report.errors)
+        {
+            LOG(LOG_ERROR, "config: %s", e.c_str());
+            std::fprintf(stderr, "error: %s\n", e.c_str());
+        }
+        log_flush();
+        return 2;
+    }
+    {
+        std::istringstream lines(config::describe(cfg));
+        for (std::string line; std::getline(lines, line);)
+            LOG(LOG_INFO, "config: %s", line.c_str());
+    }
+
+    // Node identity (N1): required whenever a config file is used; v1 does not use it yet.
+    crypto::NodeIdentity node_identity;
+    if (!cfg.node_key.empty())
+    {
+        std::string err;
+        if (!crypto::loadNodeKey(cfg.node_key, node_identity, err))
+        {
+            LOG(LOG_ERROR, "node identity: %s", err.c_str());
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            log_flush();
+            return 2;
+        }
+        LOG(LOG_INFO, "Node public key (S_pub): %s", node_identity.publicKeyBase64Url().c_str());
+    }
+    else
+        LOG(LOG_WARN, "No node identity (no config file): protocol v1 only. "
+                      "Create one with --gen-key before protocol v2 (M4).");
 
     struct sigaction sa{};
     sa.sa_handler = handle_sigint;
@@ -273,8 +403,19 @@ int main()
     sigaction(SIGTERM, &sa, nullptr);
 
     ClientSession client_connection_sessions;
-    ClientManager cm(100, "10.8.0.2");
-    int tun = TunDevice::create("tun0");
+    ClientManager cm(static_cast<int>(cfg.pool_size), net::ipv4ToString(cfg.pool_start).c_str());
+    int tun = TunDevice::create(cfg.tun_name.c_str());
+    if (cfg.configure_tun)
+    {
+        std::string err;
+        if (!TunDevice::configure(cfg.tun_name.c_str(), cfg.tun_addr, cfg.tun_prefix, cfg.mtu, err))
+        {
+            LOG(LOG_ERROR, "TUN configuration failed: %s", err.c_str());
+            std::fprintf(stderr, "error: TUN configuration failed: %s\n", err.c_str());
+            log_flush();
+            return 1;
+        }
+    }
     if (!crypto::CipherRegistry::instance().find(crypto::kCipherXor))
     {
         LOG(LOG_ERROR, "Protocol v1 requires the xor backend, which is not registered");
@@ -283,15 +424,15 @@ int main()
     for (const auto &b : crypto::CipherRegistry::instance().all())
         LOG(LOG_INFO, "Cipher backend: id %u %s/%s%s", b->algorithmId(), b->algorithmName(),
             b->implName(), b->insecure() ? " (INSECURE, protocol v1 only)" : "");
-    int sock = SocketManager::createUdpSocket(5555);
+    int sock = SocketManager::createUdpSocket(cfg.port);
     if (sock < 0)
     {
         std::cerr << "[ERROR] Failed to create UDP socket\n";
         return 1;
     }
     unsigned char main_loop_buf[2000];
-    const int HANDSHAKE_TIMEOUT = 10; // seconds
-    const int CLIENT_DEAD_TIMEOUT = 60; // seconds — sweep clients with no activity
+    const int HANDSHAKE_TIMEOUT = cfg.pending_expiry_s; // [timers] pending_expiry_s (default 10)
+    const int CLIENT_DEAD_TIMEOUT = cfg.dead_after_s;   // [timers] dead_after_s (default 60): sweep idle clients
     fcntl(sock, F_SETFL, O_NONBLOCK);
     fcntl(tun, F_SETFL, O_NONBLOCK);
 

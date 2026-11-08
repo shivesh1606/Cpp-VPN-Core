@@ -9,3 +9,14 @@ venv/*
 Reports/*
 scripts/copyToAws.sh
 Cpp-VPN-Core.code-workspace
+
+# Secrets: never commit keys or credentials (node keys from vpn_server --gen-key, TLS/SSH keys,
+# Terraform state that may contain IPs and tokens)
+*.key
+*.key.tmp
+*.pem
+*.p12
+.env
+*.tfstate
+*.tfstate.*
+.terraform/

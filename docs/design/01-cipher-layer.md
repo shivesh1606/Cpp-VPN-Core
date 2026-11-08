@@ -17,7 +17,7 @@ Links in this section point to that commit. Since M1, the XOR cipher sits behind
 |---|---|---|
 | Cipher | `result[i] = data[i] ^ xorkey` ([crypto/XorCipher.cpp:5-6](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp#L5-L6)) | 1-byte key, 256-value keyspace. Brute-forced by testing for an IPv4 first byte `0x45`. |
 | Key | `uint8_t xor_key` per client ([sessions/client/Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24)) | Derived from DH with `P=127` ([crypto/DiffieHellman.h:7-8](../../crypto/DiffieHellman.h#L7-L8)) |
-| Integrity | None | Forged or modified packets are accepted. A spoofed `PKT_DATA` carrying a guessed `session_id` triggers roaming ([main.cpp:49-60](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L49-L60); still true on v1 today, at [main.cpp:50-61](../../main.cpp#L50-L61)) and redirects the victim's downstream traffic. |
+| Integrity | None | Forged or modified packets are accepted. A spoofed `PKT_DATA` carrying a guessed `session_id` triggers roaming ([main.cpp:49-60](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L49-L60); still true on v1 today, at [main.cpp:57-68](../../main.cpp#L57-L68)) and redirects the victim's downstream traffic. |
 | Call sites | decrypt [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75), encrypt [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | Hard-wired to the singleton `XorCipher::getInstance()` |
 
 ## 2. Decision
@@ -123,6 +123,14 @@ allow_insecure_xor    = false                         # true only for baseline b
 
 Negotiation rule: the server selects the first entry of `algorithms` that is also in the client's `cipher_offer[]`. If there's no intersection, the handshake fails.
 
+**Status (M3):**
+- The `[crypto]` keys are parsed and validated against the registry of the running binary ([config/NodeConfig.cpp](../../config/NodeConfig.cpp)):
+  - unknown algorithms or implementations are startup errors;
+  - `impl.X = openssl` needs `-DWITH_OPENSSL=ON`;
+  - `xor` needs `allow_insecure_xor = true`.
+- Negotiation and `impl.*` selection take effect with protocol v2 (M4). Until then the server warns that these keys are not used yet.
+- All keys are documented in [deploy/node.conf.example](../../deploy/node.conf.example).
+
 ### 2.4 Out of scope (fixed, not pluggable)
 
 Handshake and ticket primitives run once per connection. They're fixed so that both peers can always bootstrap: X25519, Ed25519 (ticket signatures), the handshake hash/KDF, and the handshake's own message AEAD. The exact handshake suite is decided in doc 02. Note that libsodium provides BLAKE2b (`crypto_generichash`) but not BLAKE2s.
@@ -146,8 +154,8 @@ Wire cost: 16-byte tag per packet, plus the v2 header (14 B, up from 5 B). Inner
 |---|---|---|---|
 | Cipher class | [crypto/XorCipher.h](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.h), [crypto/XorCipher.cpp](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp) | Becomes `XorBackend` (id 0). Add `crypto/SessionLock.h`, `crypto/CipherRegistry.{h,cpp}`, `crypto/backends/*` | Done (M1, M2) |
 | Client state | `uint8_t xor_key` ([Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24)) | `std::unique_ptr<SessionLock> rx, tx; uint64_t tx_counter; ReplayWindow rx_window;` | Locks and counter done in M1 ([Client_Manager.h](../../sessions/client/Client_Manager.h)); replay window in M4 |
-| RX path | `enc.crypt(...)` [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75) | `client->rx->open(...)`; on `false`, drop and count `auth_fail` | Done (M1): [main.cpp:84](../../main.cpp#L84), counter `rx_auth_fail` |
-| TX path | `enc.crypt(...)` [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | `client->tx->seal(client->tx_counter++, ...)` | Done (M1): [main.cpp:495](../../main.cpp#L495) |
+| RX path | `enc.crypt(...)` [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75) | `client->rx->open(...)`; on `false`, drop and count `auth_fail` | Done (M1): [main.cpp:91](../../main.cpp#L91), counter `rx_auth_fail` |
+| TX path | `enc.crypt(...)` [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | `client->tx->seal(client->tx_counter++, ...)` | Done (M1): [main.cpp:636](../../main.cpp#L636) |
 | Build | [CMakeLists.txt:37-53](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/CMakeLists.txt#L37-L53) | libsodium required (static link), `WITH_OPENSSL` (optional); new `crypto_bench` target | Done (M2). libsodium is unconditional; there is no `WITH_LIBSODIUM` switch |
 | Docker | [Dockerfile:3-7](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/Dockerfile#L3-L7) | `apt-get install libsodium-dev` (static `libsodium.a`), optionally `libssl-dev` | Done (M2). Both installed; image built with `-DWITH_OPENSSL=ON` |
 | Stats | `enc_cycles`/`dec_cycles` ([utils/counter_definition.h:62-63](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/utils/counter_definition.h#L62-L63)) | Unchanged; works for any backend. Add an `auth_fail` counter. | Done (M1): `rx_auth_fail`, `udp_rx_truncated` |

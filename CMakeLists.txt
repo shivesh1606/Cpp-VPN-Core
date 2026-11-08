@@ -41,7 +41,12 @@ add_library(vpn_core STATIC
     sessions/client/Client_Manager.cpp
     sessions/session/ClientSession.cpp
 
+    config/Ini.cpp
+    config/NodeConfig.cpp
+    config/Cli.cpp
+
     crypto/CipherRegistry.cpp
+    crypto/NodeIdentity.cpp
     crypto/backends/XorBackend.cpp
     crypto/backends/SodiumAead.cpp
     crypto/DiffieHellman.cpp

@@ -17,9 +17,15 @@ The engine is built as the static library `vpn_core`. Both `vpn_server` and `uni
 | [crypto/test_aead_kat.cpp](crypto/test_aead_kat.cpp) | Known-answer tests (design 01 C5), typed over every implementation: RFC 8439 §2.8.2 for ChaCha20-Poly1305, and GCM spec test cases 13–16 for AES-256-GCM. Seal must match byte for byte; open must recover the plaintext and reject a flipped tag. |
 | [crypto/test_aead_lock.cpp](crypto/test_aead_lock.cpp) | `counterNonce` layout (C1). `AeadLock<P>` equals primitive `P` with the counter nonce. Cross-implementation test: every pair of libraries for one algorithm produces identical ciphertext and opens each other's output (runs when built `-DWITH_OPENSSL=ON`, as Docker is). |
 | [crypto/hex.h](crypto/hex.h) | Helper: hex vectors pasted in their source document's layout |
+| [config/test_ini.cpp](config/test_ini.cpp) | INI syntax: sections, inline comments, `#` inside URLs, CRLF/BOM, line-numbered errors, duplicate keys, overrides |
+| [config/test_node_config.cpp](config/test_node_config.cpp) | Defaults equal the pre-M3 constants; file < `--set` precedence; unknown keys; value ranges; auth modes rejected until M4/M5; crypto checked against the registry; `deploy/node.conf.example` stays valid |
+| [config/test_cli.cpp](config/test_cli.cpp) | Command-line modes, repeated `--set`, missing values, conflicting modes |
+| [crypto/test_node_identity.cpp](crypto/test_node_identity.cpp) | `--gen-key` file: mode 0600, no temporary file left behind, refuses to overwrite unless forced, S_pub = X25519(sk); loading rejects mode 0644, malformed or missing files; base64url |
+| [net/test_cidr.cpp](net/test_cidr.cpp) | `tun_cidr` parsing, netmask, broadcast, pool = server+1 … broadcast−1, prefix limits |
 | [net/test_ipv4.cpp](net/test_ipv4.cpp) | `ipv4Destination` (plan H1): short packets, non-IPv4, null |
 | [sessions/test_client_manager.cpp](sessions/test_client_manager.cpp) | IP pool, `addClient` with locks, lookups, roaming, BYE removal, sweep. `DISABLED_` test documents defect H3 (enable in M4). |
 | [e2e/v1_roundtrip.py](e2e/v1_roundtrip.py) | Real v1 handshake, plus ICMP echo through the tunnel (UDP→TUN and TUN→UDP), plus BYE |
+| [e2e/run_docker_e2e.sh](e2e/run_docker_e2e.sh) | Runs the round trip in Docker for (A) no config, (B) `node.conf` + node key with the server configuring `tun0`, and (C) checks that a config without a key refuses to start |
 
 ## Run
 
@@ -32,7 +38,10 @@ cmake -S . -B build -DWITH_OPENSSL=ON && cmake --build build -j && (cd build && 
 ./build/tests/unit_tests --gtest_filter='XorBackend.*'      # subset
 ./build/tests/unit_tests --gtest_also_run_disabled_tests     # include known-defect tests
 
-# End-to-end (server container with TUN)
+# End-to-end, all scenarios (needs Docker; from Git Bash or Linux)
+bash tests/e2e/run_docker_e2e.sh
+
+# End-to-end by hand (server container with TUN)
 MSYS_NO_PATHCONV=1 docker run -d --name cppvpn-e2e --cap-add NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun -p 5555:5555/udp vpn-builder-stage /src/build/vpn_server
 docker exec cppvpn-e2e sh -c "apt-get update -qq && apt-get install -y -qq iproute2 python3 >/dev/null \

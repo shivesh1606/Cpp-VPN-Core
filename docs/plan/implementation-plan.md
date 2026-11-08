@@ -29,7 +29,7 @@ M3 Node config & identity ────┴─────────────
 | M0 | Windows test client (protocol v1) | **Done** (branch `feature/windows-test-client`) | — |
 | M1 | Cipher-layer refactor, no wire change, plus hardening fixes H1–H2 | **In review** (branch `feature/m1-cipher-layer`) | — |
 | M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | **In review** (branch `feature/m2-libsodium`); experiment 002 target-node runs deferred (2026-11-08) | M1 |
-| M3 | Node config file and node identity key | Not started; decisions N1–N5 accepted 2026-11-08 | — |
+| M3 | Node config file and node identity key | **In review** (branch `feature/m3-node-config`) | — |
 | M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | Not started | M2, M3 |
 | M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | Not started | M4 |
 | M6 | Android: v2 + tickets + QR import | Not started | M5 |
@@ -130,13 +130,38 @@ Decisions N1–N5 below (Discussion 4a). Design 01 §2.3, design 02 §7, design 
 
 | Task | Notes |
 |---|---|
-| INI parser plus `NodeConfig` struct; `--config PATH` (default `/etc/cppvpn/node.conf`) | replaces hardcoded port, pool and timeouts at [main.cpp:276-294](../../main.cpp#L276-L294) |
+| INI parser plus `NodeConfig` struct; `--config PATH` (default `/etc/cppvpn/node.conf`) | replaces hardcoded port, pool and timeouts at [main.cpp:256-267](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L256-L267) |
 | `vpn_server --gen-key PATH`: writes the X25519 private key (mode 0600) and prints `S_pub` (base64url) | N1 |
 | On start: load the key and refuse to run if it's missing | N1 |
 | Server assigns the `tun0` address from `tun_cidr`; pool derived from it | N5 |
 | Example `deploy/node.conf.example` | all keys documented |
 
 **Acceptance:** with no `--config`, the server behaves exactly like today; with a config, port, pool and keys come from the file.
+
+**Delivered (2026-11-09)**
+- **Config:**
+  - [config/Ini](../../config/Ini.h): INI parser with line-numbered errors and duplicate-key detection;
+  - [config/NodeConfig](../../config/NodeConfig.h): schema, defaults and validation;
+  - [config/Cli](../../config/Cli.h): command line.
+- **Precedence (N3):** defaults < file < `--set section.key=value`. `/etc/cppvpn/node.conf` is read automatically if it exists; `--config PATH` overrides it.
+- **Defaults equal the pre-M3 constants:** port 5555, `tun0`, pool 10.8.0.2 × 100, pending 10 s, idle sweep 60 s. A unit test pins them.
+- **Strict validation:**
+  - unknown sections or keys are errors;
+  - `crypto.*` is checked against the cipher registry;
+  - `xor` needs `allow_insecure_xor`;
+  - `auth.mode` other than `open` is **rejected until M4/M5**, so a config can't claim protection the binary doesn't have;
+  - keys for protocol v2 and tickets are validated now, with a "not used until M4/M5" warning.
+- **Identity (N1):**
+  - `--gen-key PATH [--force]` writes the X25519 private key as base64url, mode 0600, via a temporary file and rename, and refuses to overwrite without `--force`;
+  - `--pubkey PATH` prints S_pub;
+  - with a config file, the server refuses to start without the key, or if the key is readable by group or others ([crypto/NodeIdentity](../../crypto/NodeIdentity.h)).
+- **TUN (N5):** with `tun_cidr`, `TunDevice::configure` sets address, netmask and MTU and brings the link up (ioctl), and the pool becomes server+1 … broadcast−1. Without `tun_cidr`, `tun0` is configured externally as before.
+- **CLI:** also `--check-config` (validate, print the effective config and S_pub), `--version`, `--help`.
+- **Reference config:** [deploy/node.conf.example](../../deploy/node.conf.example), every key documented. A unit test keeps it valid.
+- **`.gitignore`:** now excludes `*.key`, `*.pem`, `.env` and Terraform state.
+- **Tests:**
+  - 110 GoogleTest cases with OpenSSL, 94 without; 45 new (INI, CIDR, CLI, NodeConfig, NodeIdentity, base64url);
+  - e2e [tests/e2e/run_docker_e2e.sh](../../tests/e2e/run_docker_e2e.sh): (A) no config, pre-M3 behaviour; (B) config + key, server configures `tun0`; (C) config without a key refuses to start. All pass, each with the v1 round trip.
 
 ## M4 — Protocol v2 (server + Windows client)
 
@@ -213,7 +238,7 @@ Design 03.
 | N2 | Config format | INI `key = value` with sections, a ~100-line parser, no dependency. Same style as the Windows client config. | TOML/JSON library (extra dependency) |
 | N3 | Location and precedence | `/etc/cppvpn/node.conf`, `--config` override; defaults < file < CLI; secrets in separate files referenced by path (`node_key = /etc/cppvpn/node.key`, mode 0600) | Environment variables |
 | N4 | Config reload | Restart only for now. Clients re-handshake in about 5 s. The revocation list hot-reloads independently through its fetcher. | `SIGHUP` live reload (parked P9) |
-| N5 | Who configures `tun0` | The server sets the address/netmask and brings the link up via `ioctl` from `tun_cidr = 10.8.0.1/24`, and derives the pool from it. NAT (MASQUERADE) stays in deployment (P1). | Keep it external, as today (address set by deploy scripts outside this repo; pool hardcoded separately at [main.cpp:276](../../main.cpp#L276), so the two can mismatch) |
+| N5 | Who configures `tun0` | The server sets the address/netmask and brings the link up via `ioctl` from `tun_cidr = 10.8.0.1/24`, and derives the pool from it. NAT (MASQUERADE) stays in deployment (P1). | Keep it external, as today (address set by deploy scripts outside this repo; pool hardcoded separately at [main.cpp:256](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L256), so the two can mismatch) |
 
 Proposed `node.conf`:
 

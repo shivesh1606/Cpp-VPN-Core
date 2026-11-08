@@ -111,7 +111,34 @@ void handleHandshake(PacketHeader *hdr, int &n, unsigned char *buf,
         }
 
         HelloPacket *hello = (HelloPacket *)buf;
-        //
+
+        SessionState *pending = client_connection_sessions.getSession(client_addr);
+        if (pending != nullptr)
+        {
+            if (pending->client_magic == hello->client_magic)
+            {
+                // Retransmitted HELLO (our WELCOME was lost or late): resend the SAME
+                // WELCOME so the client's key/IP always match what ACK will register
+                WelcomePacket welcome{};
+                welcome.hdr.type = PKT_WELCOME;
+                welcome.hdr.session_id = htonl(pending->session_id);
+                welcome.assigned_tun_ip = htonl(pending->assigned_tun_ip);
+                welcome.ys = htonl(modexp(G, pending->b, P));
+                pending->created_at = time(nullptr); // client is still trying, keep it alive
+
+                sendto(sock, (char *)&welcome, sizeof(welcome), 0,
+                       (struct sockaddr *)&client_addr, sizeof(client_addr));
+                LOG(LOG_INFO, "Handshake: duplicate HELLO from %s, resent WELCOME for session %u",
+                    inet_ntoa(client_addr.sin_addr), pending->session_id);
+                return;
+            }
+
+            // New handshake from the same address: drop the stale one and release its IP
+            LOG(LOG_INFO, "Handshake: new HELLO from %s replaces pending session %u",
+                inet_ntoa(client_addr.sin_addr), pending->session_id);
+            cm.freeIp(pending->assigned_tun_ip);
+            client_connection_sessions.eraseSession(client_addr);
+        }
 
         uint32_t nextAvailableIp = cm.getNextAvailableIp();
         uint32_t session_id=cm.generateSessionId();
@@ -285,10 +312,16 @@ int main()
         {
             last = now;
 
-            global_stats.print_Stats();
+            // select() now wakes every second; skip the stats block for idle seconds
+            if (global_stats.udp_rx_pkts || global_stats.tun_rx_pkts || global_stats.handshake_pkts)
+                global_stats.print_Stats();
             global_stats.reset_Stats();
 
-            client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT);
+            // Handshakes that never got an ACK: return their reserved IPs to the pool
+            for (uint32_t ip : client_connection_sessions.eraseExpiredSessions(HANDSHAKE_TIMEOUT))
+            {
+                cm.freeIp(ip);
+            }
 
             // Sweep clients that haven't sent data/keepalive
             int swept = cm.sweepDeadClients(CLIENT_DEAD_TIMEOUT);
@@ -304,7 +337,10 @@ int main()
         FD_SET(tun, &rf);
 
         int nf = std::max(sock, tun) + 1;
-        int ret = select(nf, &rf, nullptr, nullptr, nullptr);
+        // Wake at least once a second so housekeeping (handshake expiry, dead-client
+        // sweep, stats) runs even when no packets arrive
+        struct timeval tv{1, 0};
+        int ret = select(nf, &rf, nullptr, nullptr, &tv);
         if (ret < 0)
         {
             perror("select");

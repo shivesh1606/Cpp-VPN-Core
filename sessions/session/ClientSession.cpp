@@ -36,14 +36,20 @@ void ClientSession::eraseSession(const sockaddr_in& addr) {
         sessions_.end());
 }
 
-void ClientSession::eraseExpiredSessions(time_t timeout_sec) {
+std::vector<uint32_t> ClientSession::eraseExpiredSessions(time_t timeout_sec) {
     time_t now = time(nullptr);
+    std::vector<uint32_t> expired_ips;
     sessions_.erase(
         std::remove_if(sessions_.begin(), sessions_.end(),
             [&](const SessionState& s) {
-                return (now - s.created_at) > timeout_sec;
+                if ((now - s.created_at) > timeout_sec) {
+                    expired_ips.push_back(s.assigned_tun_ip);
+                    return true;
+                }
+                return false;
             }),
         sessions_.end());
+    return expired_ips;
 }
 
 SessionState* ClientSession::getSession(const sockaddr_in& addr) {

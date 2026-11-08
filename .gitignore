@@ -8,3 +8,4 @@ venv/*
 */plots/*
 Reports/*
 scripts/copyToAws.sh
+Cpp-VPN-Core.code-workspace

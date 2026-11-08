@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include "crypto/CipherRegistry.h"
+#include "crypto/backends/SodiumAead.h"
 #include "crypto/backends/XorBackend.h"
 
 using namespace crypto;
@@ -49,6 +51,46 @@ TEST(CipherRegistry, GlobalInstanceHasXorForProtocolV1)
     ASSERT_NE(b, nullptr);
     EXPECT_STREQ(b->implName(), "builtin");
     EXPECT_TRUE(b->insecure());
+}
+
+// ---- What the global registry contains (milestone M2) ----
+
+TEST(CipherRegistry, GlobalDefaultForChaCha20Poly1305IsLibsodium)
+{
+    ASSERT_TRUE(sodiumReady());
+    const CipherBackend *b = CipherRegistry::instance().find(kCipherChaCha20Poly1305);
+    ASSERT_NE(b, nullptr);
+    EXPECT_STREQ(b->implName(), "libsodium");
+    EXPECT_STREQ(b->algorithmName(), "chacha20poly1305");
+    EXPECT_FALSE(b->insecure());
+}
+
+TEST(CipherRegistry, GlobalAes256GcmFollowsHardwareAndBuildOptions)
+{
+    const auto &r = CipherRegistry::instance();
+    EXPECT_EQ(r.find(kCipherAes256Gcm, "libsodium") != nullptr, sodiumAes256GcmAvailable());
+    EXPECT_EQ(r.find(kCipherAes256Gcm, "openssl") != nullptr, bool(CPPVPN_WITH_OPENSSL));
+    EXPECT_EQ(r.find(kCipherChaCha20Poly1305, "openssl") != nullptr, bool(CPPVPN_WITH_OPENSSL));
+}
+
+// algorithms() is the basis of the HELLO cipher_offer[]: strongest default first, xor last.
+TEST(CipherRegistry, GlobalPreferenceOrderPutsChaChaFirstAndXorLast)
+{
+    const auto ids = CipherRegistry::instance().algorithms();
+    ASSERT_GE(ids.size(), 2u);
+    EXPECT_EQ(ids.front(), kCipherChaCha20Poly1305);
+    EXPECT_EQ(ids.back(), kCipherXor);
+}
+
+TEST(CipherRegistry, OnlyXorIsInsecureAndEveryAeadHas16ByteTag)
+{
+    const uint8_t key[kKeyBytes] = {1};
+    for (const auto &b : CipherRegistry::instance().all())
+    {
+        SCOPED_TRACE(std::string(b->algorithmName()) + "/" + b->implName());
+        EXPECT_EQ(b->insecure(), b->algorithmId() == kCipherXor);
+        EXPECT_EQ(b->newLock(key)->overhead(), b->algorithmId() == kCipherXor ? 0u : 16u);
+    }
 }
 
 TEST(CipherRegistry, UnknownAlgorithmReturnsNull)

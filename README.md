@@ -59,7 +59,7 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 
 ## 🧭 Design Documents & Roadmap
 
-> **Security status:** the current XOR cipher and small-parameter Diffie-Hellman are placeholders. They don't provide confidentiality, integrity, or client authentication. Replacing them is in progress.
+> **Security status:** on the wire, protocol v1 still uses the placeholder XOR cipher and small-parameter Diffie-Hellman. They don't provide confidentiality, integrity, or client authentication. The replacement AEAD ciphers (libsodium ChaCha20-Poly1305 / AES-256-GCM, optional OpenSSL) are built and tested since M2 ([crypto/backends/](crypto/backends/)). They go on the wire with protocol v2 (M4).
 
 Target designs and their rationale are in [docs/design/](docs/design/README.md):
 
@@ -71,7 +71,8 @@ Target designs and their rationale are in [docs/design/](docs/design/README.md):
 | 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked |
 
 - **Plan:** [implementation plan](docs/plan/implementation-plan.md) (milestones M0–M7) · [parked discussions](docs/plan/parked-discussions.md)
-- **Measurements:** [experiments/](experiments/README.md), e.g. [001: per-packet crypto cost](experiments/001-crypto-per-packet-cost/README.md)
+- **Measurements:** [experiments/](experiments/README.md): [001: per-packet crypto cost](experiments/001-crypto-per-packet-cost/README.md) · [002: `crypto_bench`, all backends](experiments/002-crypto-bench-backends/README.md)
+- **Tests:** [tests/](tests/README.md) (GoogleTest + CTest; runs in every Docker build)
 - **Testing without the phone:** [Windows test client](clients/windows/README.md) (`--probe` needs no admin)
 
 ## 📚 Reading Guide
@@ -94,12 +95,24 @@ New to the concepts in the design docs (AEAD, Noise IK, X25519, tickets…)? The
 ## ⚙️ Building the Core
 
 ```bash
-# Clone and build
-./scripts/runbuild.sh
+# Dependencies (Ubuntu 22.04); libssl-dev only for -DWITH_OPENSSL=ON
+sudo apt-get install -y build-essential cmake libsodium-dev libssl-dev libgtest-dev
+
+# Build, run the unit tests, benchmark the ciphers
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENSSL=ON
+cmake --build build -j
+(cd build && ctest --output-on-failure)
+taskset -c 0 ./build/crypto_bench --sizes 64,512,1400
+
+# Or build and test in Docker (no local dependencies)
+docker build --target builder -t vpn-builder-stage .
+
+# Execution (requires root for TUN device creation)
+sudo ./build/vpn_server
 ```
 
-# Execution (Requires root for TUN device creation)
-sudo ./vpn_server
+The legacy script [scripts/runbuild.sh](scripts/runbuild.sh) builds without a build type (`-O2`). Release builds add `-O3` ([experiment 002](experiments/002-crypto-bench-backends/README.md)).
+
 ---
 
 ## 📫 Professional Contact

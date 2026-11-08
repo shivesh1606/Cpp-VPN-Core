@@ -17,6 +17,8 @@ add_executable(unit_tests
     crypto/test_xor_backend.cpp
     crypto/test_cipher_registry.cpp
     crypto/test_session_lock_contract.cpp
+    crypto/test_aead_kat.cpp
+    crypto/test_aead_lock.cpp
     net/test_ipv4.cpp
     sessions/test_client_manager.cpp
 )

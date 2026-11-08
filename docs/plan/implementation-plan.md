@@ -28,7 +28,7 @@ M3 Node config & identity ────┴─────────────
 |---|---|---|---|
 | M0 | Windows test client (protocol v1) | **Done** (branch `feature/windows-test-client`) | — |
 | M1 | Cipher-layer refactor, no wire change, plus hardening fixes H1–H2 | **In review** (branch `feature/m1-cipher-layer`) | — |
-| M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | Not started | M1 |
+| M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | **In review** (branch `feature/m2-libsodium`); experiment 002 target-node runs pending | M1 |
 | M3 | Node config file and node identity key | Not started; decisions N1–N5 accepted 2026-11-08 | — |
 | M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | Not started | M2, M3 |
 | M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | Not started | M4 |
@@ -102,6 +102,27 @@ Design 01 §2.1, C5, §5; rollout step 2.
 | **Experiment 002:** `crypto_bench` on the GCP node (and Oracle A1 arm64 if available) | arm64 build needed for A1 |
 
 **Acceptance:** KATs pass; `crypto_bench` prints every registered backend; experiment 002 results are committed.
+
+**Delivered (2026-11-08)**
+- **Backends:** one generic `AeadLock<P>`/`AeadBackend<P>` ([crypto/backends/AeadLock.h](../../crypto/backends/AeadLock.h)) holds the counter nonce (C1) and tag handling. The primitives:
+  - libsodium ChaCha20-Poly1305 (id 1, always) and AES-256-GCM (id 2, only if `crypto_aead_aes256gcm_is_available()`), in [SodiumAead](../../crypto/backends/SodiumAead.h);
+  - OpenSSL ChaCha20-Poly1305 and AES-256-GCM behind `-DWITH_OPENSSL=ON`, in [OpenSslAead](../../crypto/backends/OpenSslAead.h).
+- **Registry order** (= default implementation and offer order): chacha20poly1305 (libsodium, openssl), aes256gcm (libsodium, openssl), xor. The server logs every registered backend at startup.
+- **Build:** libsodium required, linked statically. OpenSSL optional, statically linked `libcrypto.a`. The Docker build installs `libsodium-dev` and `libssl-dev` and builds `-DWITH_OPENSSL=ON`, so the cross-implementation test runs in CI.
+- **Tests:** 74 GoogleTest cases with OpenSSL, 58 without:
+  - KATs: RFC 8439 §2.8.2; GCM spec test cases 13–16;
+  - `counterNonce` layout;
+  - `AeadLock<P>` equals `P` with the counter nonce;
+  - cross-implementation, byte-identical;
+  - registry composition;
+  - contract suite over all backends. Test names are now stable (no pointer values).
+- **`crypto_bench`:** [tools/crypto_bench.cpp](../../tools/crypto_bench.cpp). Times seal / open / open-forged of every registered backend through the real `SessionLock`.
+- **Experiment 002:** [results](../../experiments/002-crypto-bench-backends/README.md) on the dev laptop. Two findings changed code or docs:
+  - **Release builds are `-O3`:** CMake appends `-O3` to the project's `-O2`, so the Docker image's XOR is vectorized. Experiment 001's `-O2` XOR baseline matches `scripts/runbuild.sh` builds, not the Docker image.
+  - **Dirty upper vector state:** after OpenSSL's AVX code, libsodium's AES-NI code ran 1.7× slower. Fixed in the engine: the OpenSSL backend issues `vzeroupper` after each call ([VectorState.h](../../crypto/backends/VectorState.h)).
+- **Not done:**
+  - **GCP e2-micro and Oracle A1 runs:** these need access to those machines. The run recipe is in the experiment README.
+  - **arm64 performance:** no numbers yet. Correctness was checked under QEMU emulation: Ubuntu 24.04 arm64, libsodium 1.0.18, OpenSSL 3.0.13, 69/69 tests pass. libsodium AES-256-GCM is correctly not registered; OpenSSL AES-256-GCM passes the KATs and the cross-implementation test. Ubuntu 22.04 arm64 could not be checked: its `ldconfig` crashes under Docker Desktop's QEMU while apt installs, before any of our code runs.
 
 ## M3 — Node config file and node identity
 

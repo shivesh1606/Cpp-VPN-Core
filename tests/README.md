@@ -13,7 +13,10 @@ The engine is built as the static library `vpn_core`. Both `vpn_server` and `uni
 |---|---|
 | [crypto/test_xor_backend.cpp](crypto/test_xor_backend.cpp) | v1 XOR: byte-identical to the removed `XorCipher::crypt` for all 256 keys, round trips, in-place operation, no integrity (documented) |
 | [crypto/test_cipher_registry.cpp](crypto/test_cipher_registry.cpp) | Lookup by algorithm and implementation, duplicates, offer order, cross-implementation interop |
-| [crypto/test_session_lock_contract.cpp](crypto/test_session_lock_contract.cpp) | **Parameterized over every registered backend.** Round trip with counter and AAD; AEAD tamper rejection (ciphertext, tag, AAD, counter); short input. New backends (M2) are covered automatically. |
+| [crypto/test_session_lock_contract.cpp](crypto/test_session_lock_contract.cpp) | **Parameterized over every registered backend.** Round trip with counter and AAD; AEAD tamper rejection (ciphertext, tag, AAD, counter); distinct counters give distinct ciphertext; short input. A newly registered backend is covered automatically. |
+| [crypto/test_aead_kat.cpp](crypto/test_aead_kat.cpp) | Known-answer tests (design 01 C5), typed over every implementation: RFC 8439 §2.8.2 for ChaCha20-Poly1305, and GCM spec test cases 13–16 for AES-256-GCM. Seal must match byte for byte; open must recover the plaintext and reject a flipped tag. |
+| [crypto/test_aead_lock.cpp](crypto/test_aead_lock.cpp) | `counterNonce` layout (C1). `AeadLock<P>` equals primitive `P` with the counter nonce. Cross-implementation test: every pair of libraries for one algorithm produces identical ciphertext and opens each other's output (runs when built `-DWITH_OPENSSL=ON`, as Docker is). |
+| [crypto/hex.h](crypto/hex.h) | Helper: hex vectors pasted in their source document's layout |
 | [net/test_ipv4.cpp](net/test_ipv4.cpp) | `ipv4Destination` (plan H1): short packets, non-IPv4, null |
 | [sessions/test_client_manager.cpp](sessions/test_client_manager.cpp) | IP pool, `addClient` with locks, lookups, roaming, BYE removal, sweep. `DISABLED_` test documents defect H3 (enable in M4). |
 | [e2e/v1_roundtrip.py](e2e/v1_roundtrip.py) | Real v1 handshake, plus ICMP echo through the tunnel (UDP→TUN and TUN→UDP), plus BYE |
@@ -24,8 +27,8 @@ The engine is built as the static library `vpn_core`. Both `vpn_server` and `uni
 # Inside Docker (what CI does): build + all unit tests
 docker build --target builder -t vpn-builder-stage .
 
-# Local Linux build dir
-cmake -S . -B build && cmake --build build -j && (cd build && ctest --output-on-failure)
+# Local Linux build dir (needs libsodium-dev; libssl-dev for -DWITH_OPENSSL=ON)
+cmake -S . -B build -DWITH_OPENSSL=ON && cmake --build build -j && (cd build && ctest --output-on-failure)
 ./build/tests/unit_tests --gtest_filter='XorBackend.*'      # subset
 ./build/tests/unit_tests --gtest_also_run_disabled_tests     # include known-defect tests
 

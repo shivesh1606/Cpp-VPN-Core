@@ -1,8 +1,9 @@
 // CipherRegistry.h - Maps wire cipher_id -> available implementations (design doc 01, section 2.2).
 //
-// Backends compiled into the binary register here. Per-algorithm implementation choice and
-// the server preference order come from node.conf (milestone M3); until then the first
-// registered implementation of an algorithm is used.
+// Backends compiled into the binary register here (libsodium always; OpenSSL with
+// -DWITH_OPENSSL=ON; libsodium AES-256-GCM only on CPUs with hardware AES; xor last).
+// Per-algorithm implementation choice and the server preference order come from node.conf
+// (milestone M3); until then the first registered implementation of an algorithm is used.
 #ifndef CRYPTO_CIPHERREGISTRY_H
 #define CRYPTO_CIPHERREGISTRY_H
 

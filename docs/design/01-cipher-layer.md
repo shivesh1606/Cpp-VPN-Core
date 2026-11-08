@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (2026-11-08) |
+| **Status** | Accepted (2026-11-08). Implemented through rollout step 2, plus step 4 (OpenSSL), in milestones M1–M2 ([plan](../plan/implementation-plan.md)). On the wire from M4. |
 | **Scope** | Per-packet encryption of tunnel traffic (server engine + Android client) |
 | **Depends on** | [02 — Handshake](README.md#index) (provides the session keys) |
 | **Replaces** | `XorCipher` single-byte XOR ([crypto/XorCipher.cpp](../../crypto/XorCipher.cpp)) |
@@ -85,6 +85,30 @@ public:
 
 Each session holds two locks: `rx` keyed with `k_c2s` and `tx` keyed with `k_s2c` (key derivation: doc 02).
 
+**As implemented (M2).** All AEAD backends share one generic lock, so the nonce rule (C1) and the tag handling exist once:
+
+```
+CipherBackend ◀── AeadBackend<P>  ──newLock()──▶  AeadLock<P> : SessionLock
+                                                    seal(ctr,…): counterNonce(ctr) → P.seal(nonce,…)
+                                                    open(ctr,…): len ≥ 16 ? P.open(nonce,…) : false
+P (primitive, 12-byte nonce in, no counter logic):
+  SodiumChaCha20Poly1305   crypto_aead_chacha20poly1305_ietf_*        always
+  SodiumAes256Gcm          crypto_aead_aes256gcm_*_afternm            if crypto_aead_aes256gcm_is_available()
+  OpenSslChaCha20Poly1305  EVP_chacha20_poly1305()                    -DWITH_OPENSSL=ON
+  OpenSslAes256Gcm         EVP_aes_256_gcm()                          -DWITH_OPENSSL=ON
+```
+
+| File | Content |
+|---|---|
+| [crypto/backends/AeadLock.h](../../crypto/backends/AeadLock.h) | `counterNonce`, `AeadLock<P>`, `AeadBackend<P>`; the primitive contract |
+| [crypto/backends/SodiumAead.{h,cpp}](../../crypto/backends/SodiumAead.h) | libsodium primitives; `sodiumReady()`, `sodiumAes256GcmAvailable()` |
+| [crypto/backends/OpenSslAead.{h,cpp}](../../crypto/backends/OpenSslAead.h) | OpenSSL EVP primitives; two pre-keyed `EVP_CIPHER_CTX` per lock (C3) |
+| [crypto/CipherRegistry.cpp](../../crypto/CipherRegistry.cpp) | Registration order = default implementation and offer order: ChaCha20-Poly1305 (libsodium, openssl), AES-256-GCM (libsodium, openssl), xor |
+
+- **Fail closed:** `seal()` stays `void`. If a library call fails internally (OpenSSL only; libsodium's calls cannot fail), the output is zero-filled, so the peer rejects the packet. On a failed `open()`, OpenSSL's already-decrypted bytes are wiped.
+- **Key hygiene:** the key and the AES key schedule are zeroed on destruction (`sodium_memzero`, `EVP_CIPHER_CTX_free`).
+- **Build:** libsodium is required and linked statically. OpenSSL (`-DWITH_OPENSSL=ON`, static `libcrypto.a`) is optional; the Docker build enables it.
+
 ### 2.3 Configuration (`node.conf`)
 
 ```ini
@@ -140,7 +164,8 @@ chacha20poly1305/openssl         1400   ...          ...           ...
 aes256gcm/openssl                1400   ...          ...           ...
 ```
 
-- Timing uses `RDTSC()` from [utils/profiling.h](../../utils/profiling.h).
+- Implemented in [tools/crypto_bench.cpp](../../tools/crypto_bench.cpp). It times the real `SessionLock` objects (one virtual call, 14-byte AAD, counter nonce), so a new backend is benchmarked as soon as it is registered. Ops: `seal`, `open`, `open-forged` (flipped tag). Median of `--runs` rounds, with spread.
+- Timing uses `CLOCK_MONOTONIC` and `__rdtsc()` directly, not `RDTSC()` from [utils/profiling.h](../../utils/profiling.h), which is compiled out unless `ENABLE_PROFILING=ON`. On arm64 only ns are reported.
 - Live in-server comparison: swap `impl.*` in `node.conf` and read `enc_cyc_per_pkt` / `dec_cyc_per_pkt` from the stats log.
 
 ### 5.1 Baseline measurements (2026-11-08, pre-implementation)
@@ -184,12 +209,28 @@ Mean cost per operation in ns:
 
 Re-run these numbers on target node hardware once `crypto_bench` exists. Free-tier shared-core VMs will be slower.
 
+### 5.2 `crypto_bench` results (2026-11-08, M2)
+
+Same laptop, now through the engine's `SessionLock` code, with all four AEAD backends. Full data and method: [experiments/002-crypto-bench-backends](../../experiments/002-crypto-bench-backends/README.md).
+
+| Median ns per op, Release build | seal 64 B | seal 1400 B | open 1400 B | forged 1400 B |
+|---|---|---|---|---|
+| chacha20poly1305 / libsodium | 300 | 1217 | 1242 | 566 |
+| chacha20poly1305 / openssl | 357 | 885 | 903 | 905 |
+| aes256gcm / libsodium | 134 | 704 | 760 | 305 |
+| aes256gcm / openssl | 204 | 483 | 448 | 456 |
+| xor / builtin (`-O3`, as in the Docker image) | 5 | 41 | 38 | — |
+
+- **Library choice depends on packet size.** OpenSSL is cheaper at 1400 B; libsodium is cheaper at 64 B and drops forged packets at about half the cost of a valid open, because it checks the tag first. The default stays libsodium until target-node data exists; M3's `impl.*` switches it without a rebuild.
+- **Mixing libraries needed a fix.** OpenSSL's AVX code slowed the libsodium AES-NI code that ran after it by 1.7×. The OpenSSL backend now issues `vzeroupper` after each call ([VectorState.h](../../crypto/backends/VectorState.h)).
+- **Release builds are `-O3`.** The production XOR baseline is 41 ns, not the `-O2` 511 ns in §5.1.
+
 ## 6. Rollout
 
-1. Introduce `SessionLock`/`CipherBackend`/`CipherRegistry`, and move XOR behind it as id 0. No wire change; existing clients keep working.
-2. Add the libsodium ChaCha20-Poly1305 backend, the KAT tests and `crypto_bench`.
-3. Enable on the wire together with protocol v2 (doc 02): v2 header, negotiation fields, replay window.
-4. Optional: OpenSSL backends for comparison.
+1. Introduce `SessionLock`/`CipherBackend`/`CipherRegistry`, and move XOR behind it as id 0. No wire change; existing clients keep working. **Done (M1).**
+2. Add the libsodium ChaCha20-Poly1305 backend, the KAT tests and `crypto_bench`. **Done (M2)**, together with libsodium AES-256-GCM.
+3. Enable on the wire together with protocol v2 (doc 02): v2 header, negotiation fields, replay window. *(M4)*
+4. Optional: OpenSSL backends for comparison. **Done (M2)**, behind `-DWITH_OPENSSL=ON`.
 
 ## References
 

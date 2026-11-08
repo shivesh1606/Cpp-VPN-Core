@@ -280,6 +280,9 @@ int main()
         LOG(LOG_ERROR, "Protocol v1 requires the xor backend, which is not registered");
         return 1;
     }
+    for (const auto &b : crypto::CipherRegistry::instance().all())
+        LOG(LOG_INFO, "Cipher backend: id %u %s/%s%s", b->algorithmId(), b->algorithmName(),
+            b->implName(), b->insecure() ? " (INSECURE, protocol v1 only)" : "");
     int sock = SocketManager::createUdpSocket(5555);
     if (sock < 0)
     {

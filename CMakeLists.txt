@@ -43,6 +43,7 @@ add_library(vpn_core STATIC
 
     crypto/CipherRegistry.cpp
     crypto/backends/XorBackend.cpp
+    crypto/backends/SodiumAead.cpp
     crypto/DiffieHellman.cpp
     crypto/KeyDerivation.cpp
 
@@ -65,9 +66,45 @@ target_include_directories(vpn_core PUBLIC
     ${CMAKE_BINARY_DIR}/generated
 )
 
+# ---------------- Crypto libraries (design doc 01, section 2) ----------------
+# libsodium is required (AEAD now, X25519/BLAKE2b/Ed25519 from M4). The static archive is
+# preferred so vpn_server has no runtime dependency on libsodium.so.
+# Ubuntu/Debian: apt-get install libsodium-dev. Elsewhere: -DCMAKE_PREFIX_PATH=<prefix>.
+find_package(Threads REQUIRED)
+find_path(SODIUM_INCLUDE_DIR sodium.h)
+find_library(SODIUM_LIBRARY NAMES libsodium.a sodium)
+if(NOT SODIUM_INCLUDE_DIR OR NOT SODIUM_LIBRARY)
+    message(FATAL_ERROR "libsodium not found: install libsodium-dev or set CMAKE_PREFIX_PATH")
+endif()
+message(STATUS "libsodium: ${SODIUM_LIBRARY}")
+target_include_directories(vpn_core PUBLIC ${SODIUM_INCLUDE_DIR})
+target_link_libraries(vpn_core PUBLIC ${SODIUM_LIBRARY} Threads::Threads)
+
+# Optional second implementation of the same algorithms, for benchmarks (experiment 002) and
+# the cross-implementation test. Selecting it at runtime comes with node.conf (M3).
+option(WITH_OPENSSL "Also build OpenSSL AEAD backends" OFF)
+if(WITH_OPENSSL)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+    find_package(OpenSSL 1.1 REQUIRED COMPONENTS Crypto)
+    message(STATUS "OpenSSL backends: ON (${OPENSSL_VERSION}, ${OPENSSL_CRYPTO_LIBRARY})")
+    target_sources(vpn_core PRIVATE crypto/backends/OpenSslAead.cpp)
+    target_compile_definitions(vpn_core PUBLIC CPPVPN_WITH_OPENSSL=1)
+    target_link_libraries(vpn_core PUBLIC OpenSSL::Crypto ${CMAKE_DL_LIBS})
+else()
+    target_compile_definitions(vpn_core PUBLIC CPPVPN_WITH_OPENSSL=0)
+endif()
+
 # ---------------- Server ----------------
 add_executable(vpn_server main.cpp)
 target_link_libraries(vpn_server PRIVATE vpn_core)
+
+# ---------------- Crypto benchmark (design doc 01, section 5; experiment 002) ----------------
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _bt)
+add_executable(crypto_bench tools/crypto_bench.cpp)
+target_link_libraries(crypto_bench PRIVATE vpn_core)
+target_compile_definitions(crypto_bench PRIVATE
+    CPPVPN_BUILD_FLAGS="${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_bt}}"
+    CPPVPN_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 
 # ---------------- Unit tests (GoogleTest, run with ctest) ----------------
 include(CTest)   # defines BUILD_TESTING (default ON)

@@ -4,6 +4,7 @@
 |---|---|
 | **Date** | 2026-11-08 |
 | **Status** | Done on a dev laptop. Runs on target nodes are pending (experiment 002). |
+| **Note (2026-11-08, from 002)** | The `-O2` XOR row matches builds without a build type (`scripts/runbuild.sh`). The Docker image builds `Release`, where CMake appends `-O3`, so its XOR is the vectorized `-O3` row. |
 | **Informs** | [Design 01: cipher layer](../../docs/design/01-cipher-layer.md) §5.1; [Design 02: handshake](../../docs/design/02-handshake.md) (handshake cost) |
 
 ## Question

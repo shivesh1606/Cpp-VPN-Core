@@ -1,0 +1,68 @@
+# ---- machine ----
+# repo commit: 838ab6f
+# Architecture:                            x86_64
+# CPU(s):                                  8
+# Model name:                              11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
+# Thread(s) per core:                      2
+# Core(s) per socket:                      4
+# Socket(s):                               1
+# Hypervisor vendor:                       Microsoft
+# Virtualization type:                     full
+# cpu flags: aes
+# pinned to cpu 2
+
+# crypto_bench (design 01 section 5)
+# date:      2026-11-08T23:25:50+0530
+# host:      LAPTOP-66CEL7JQ 6.18.54.1-microsoft-standard-WSL2 x86_64
+# cpu:       11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
+# compiler:  11.4.0, build type 'Release', flags '-Wall -Wextra -O2 -O3 -DNDEBUG'
+# libsodium: 1.0.18 (hardware AES-256-GCM: yes)
+# openssl:   OpenSSL 3.0.2 15 Mar 2022
+# method:    1000000 ops x 3 runs per row after 100000 warm-up ops; median reported; spread = (max-min)/median
+# isolation: vzeroupper before each row: yes
+# timing:    CLOCK_MONOTONIC ns, TSC reference cycles (not core cycles); AAD 14 B; counter nonce
+# backends:  chacha20poly1305/libsodium chacha20poly1305/openssl aes256gcm/libsodium aes256gcm/openssl xor/builtin
+
+backend                      op             size      ns/op     cyc/op    cyc/B   Gbit/s  spread
+chacha20poly1305/libsodium   seal             64      299.6        690    10.79     1.71    1.4%
+chacha20poly1305/libsodium   open             64      304.5        702    10.96     1.68    6.7%
+chacha20poly1305/libsodium   open-forged      64      210.5        485     7.58     2.43    1.1%
+chacha20poly1305/libsodium   seal            512      507.9       1170     2.29     8.06    4.2%
+chacha20poly1305/libsodium   open            512      496.8       1145     2.24     8.24    1.7%
+chacha20poly1305/libsodium   open-forged     512      343.0        790     1.54    11.94    8.3%
+chacha20poly1305/libsodium   seal           1400     1217.3       2805     2.00     9.20    6.8%
+chacha20poly1305/libsodium   open           1400     1241.6       2861     2.04     9.02    5.0%
+chacha20poly1305/libsodium   open-forged    1400      566.1       1304     0.93    19.79    5.1%
+chacha20poly1305/openssl     seal             64      357.2        823    12.86     1.43    0.5%
+chacha20poly1305/openssl     open             64      365.5        842    13.16     1.40    0.6%
+chacha20poly1305/openssl     open-forged      64      392.6        905    14.14     1.30   15.4%
+chacha20poly1305/openssl     seal            512      476.0       1097     2.14     8.61    2.6%
+chacha20poly1305/openssl     open            512      486.4       1121     2.19     8.42    3.7%
+chacha20poly1305/openssl     open-forged     512      493.0       1136     2.22     8.31    1.4%
+chacha20poly1305/openssl     seal           1400      885.2       2040     1.46    12.65    1.2%
+chacha20poly1305/openssl     open           1400      903.4       2081     1.49    12.40    4.6%
+chacha20poly1305/openssl     open-forged    1400      904.8       2085     1.49    12.38    1.5%
+aes256gcm/libsodium          seal             64      134.3        309     4.83     3.81    2.5%
+aes256gcm/libsodium          open             64      131.3        302     4.73     3.90    2.1%
+aes256gcm/libsodium          open-forged      64       78.2        180     2.81     6.55    0.8%
+aes256gcm/libsodium          seal            512      255.6        589     1.15    16.02    2.3%
+aes256gcm/libsodium          open            512      279.6        644     1.26    14.65    2.1%
+aes256gcm/libsodium          open-forged     512      119.8        276     0.54    34.20    6.8%
+aes256gcm/libsodium          seal           1400      703.9       1622     1.16    15.91    2.0%
+aes256gcm/libsodium          open           1400      760.4       1752     1.25    14.73    7.4%
+aes256gcm/libsodium          open-forged    1400      304.9        703     0.50    36.73   11.1%
+aes256gcm/openssl            seal             64      204.1        470     7.35     2.51    1.1%
+aes256gcm/openssl            open             64      196.3        452     7.07     2.61   12.0%
+aes256gcm/openssl            open-forged      64      197.6        455     7.11     2.59    3.1%
+aes256gcm/openssl            seal            512      308.3        710     1.39    13.28    7.1%
+aes256gcm/openssl            open            512      285.1        657     1.28    14.37    3.1%
+aes256gcm/openssl            open-forged     512      298.9        689     1.35    13.70   37.2%
+aes256gcm/openssl            seal           1400      482.5       1112     0.79    23.21   20.8%
+aes256gcm/openssl            open           1400      447.9       1032     0.74    25.01    2.1%
+aes256gcm/openssl            open-forged    1400      455.6       1050     0.75    24.58   12.2%
+xor/builtin                  seal             64        4.6         11     0.17   111.68    9.5%
+xor/builtin                  open             64        3.7          8     0.13   139.32    3.9%
+xor/builtin                  seal            512       20.8         48     0.09   197.19   86.7%
+xor/builtin                  open            512       11.6         27     0.05   352.30    9.4%
+xor/builtin                  seal           1400       41.0         95     0.07   273.05    1.7%
+xor/builtin                  open           1400       37.5         86     0.06   298.72    2.8%

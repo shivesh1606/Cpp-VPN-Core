@@ -17,10 +17,18 @@ add_executable(unit_tests
     crypto/test_xor_backend.cpp
     crypto/test_cipher_registry.cpp
     crypto/test_session_lock_contract.cpp
+    crypto/test_aead_kat.cpp
+    crypto/test_aead_lock.cpp
     net/test_ipv4.cpp
+    net/test_cidr.cpp
+    config/test_ini.cpp
+    config/test_node_config.cpp
+    config/test_cli.cpp
+    crypto/test_node_identity.cpp
     sessions/test_client_manager.cpp
 )
 target_link_libraries(unit_tests PRIVATE vpn_core GTest::gtest_main)
+target_compile_definitions(unit_tests PRIVATE CPPVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 include(GoogleTest)
 gtest_discover_tests(unit_tests)

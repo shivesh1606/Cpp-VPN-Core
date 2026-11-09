@@ -16,12 +16,12 @@ Measurements that inform design decisions. Design docs ([docs/design/](../docs/d
 
 | # | Experiment | Question | Status | Used by |
 |---|---|---|---|---|
-| 001 | [Per-packet crypto cost](001-crypto-per-packet-cost/README.md) | How much time does replacing XOR with AEAD add per data packet? | Done on a dev laptop; target-node runs pending | [Design 01 §5.1](../docs/design/01-cipher-layer.md) |
+| 001 | [Per-packet crypto cost](001-crypto-per-packet-cost/README.md) | How much time does replacing XOR with AEAD add per data packet? | Done on a dev laptop; superseded for target nodes by 002 | [Design 01 §5.1](../docs/design/01-cipher-layer.md) |
+| 002 | [`crypto_bench`: every backend](002-crypto-bench-backends/README.md) | Which library is fastest per algorithm, through the engine's real `SessionLock` code? | Done on a dev laptop; GCP e2-micro and Oracle A1 runs deferred | [Design 01 §5](../docs/design/01-cipher-layer.md#5-benchmark-plan), M3 `impl.*` defaults |
 
 ## Planned
 
 | # | Experiment | Depends on |
 |---|---|---|
-| 002 | `crypto_bench` on target nodes (GCP e2-micro x86, Oracle A1 arm64), all backends | Plan milestone M2 |
 | 003 | End-to-end tunnel throughput and latency: XOR (v1) vs AEAD (v2) over the same path (Windows client → node) | M4 |
 | 004 | Handshake rate and CPU cost under a HELLO flood (mac1 effectiveness) | M4 |

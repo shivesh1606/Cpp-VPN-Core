@@ -52,26 +52,27 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 * **Language:** C++17 (Focus on performance and RAII)
 * **Build System:** CMake (With modular profiling toggles)
 * **Network Interfaces:** Linux TUN/TAP, UDP Sockets
-* **Cryptography:** Diffie-Hellman Key Exchange, Custom XOR Stream Cipher
+* **Cryptography:** Diffie-Hellman key exchange and XOR stream cipher (protocol v1 placeholders); pluggable AEAD cipher layer with libsodium and OpenSSL backends (ChaCha20-Poly1305, AES-256-GCM), on the wire with protocol v2
 * **System Utilities:** `recvmmsg`, `sendmmsg`, `fcntl`, `ioctl`
 
 ---
 
 ## 🧭 Design Documents & Roadmap
 
-> **Security status:** the current XOR cipher and small-parameter Diffie-Hellman are placeholders. They don't provide confidentiality, integrity, or client authentication. Replacing them is in progress.
+> **Security status:** on the wire, protocol v1 still uses the placeholder XOR cipher and small-parameter Diffie-Hellman. They don't provide confidentiality, integrity, or client authentication. The replacement AEAD ciphers (libsodium ChaCha20-Poly1305 / AES-256-GCM, optional OpenSSL) are built and tested since M2 ([crypto/backends/](crypto/backends/)). They go on the wire with protocol v2 (M4).
 
 Target designs and their rationale are in [docs/design/](docs/design/README.md):
 
-| # | Document | Status |
-|---|---|---|
-| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted |
-| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted |
-| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted |
-| 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked |
+| # | Document | Status | Implementation |
+|---|---|---|---|
+| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted | M1–M2 done; on the wire in M4 |
+| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted | M4 |
+| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted | M5 |
+| 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked | 4a done in M3 |
 
 - **Plan:** [implementation plan](docs/plan/implementation-plan.md) (milestones M0–M7) · [parked discussions](docs/plan/parked-discussions.md)
-- **Measurements:** [experiments/](experiments/README.md), e.g. [001: per-packet crypto cost](experiments/001-crypto-per-packet-cost/README.md)
+- **Measurements:** [experiments/](experiments/README.md): [001: per-packet crypto cost](experiments/001-crypto-per-packet-cost/README.md) · [002: `crypto_bench`, all backends](experiments/002-crypto-bench-backends/README.md)
+- **Tests:** [tests/](tests/README.md) (GoogleTest + CTest; runs in every Docker build)
 - **Testing without the phone:** [Windows test client](clients/windows/README.md) (`--probe` needs no admin)
 
 ## 📚 Reading Guide
@@ -94,12 +95,39 @@ New to the concepts in the design docs (AEAD, Noise IK, X25519, tickets…)? The
 ## ⚙️ Building the Core
 
 ```bash
-# Clone and build
-./scripts/runbuild.sh
+# Dependencies (Ubuntu 22.04); libssl-dev only for -DWITH_OPENSSL=ON
+sudo apt-get install -y build-essential cmake libsodium-dev libssl-dev libgtest-dev
+
+# Build, run the unit tests, benchmark the ciphers
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENSSL=ON
+cmake --build build -j
+(cd build && ctest --output-on-failure)
+taskset -c 0 ./build/crypto_bench --sizes 64,512,1400
+
+# Or build and test in Docker (no local dependencies)
+docker build --target builder -t vpn-builder-stage .
+
+# Execution (requires root for TUN device creation)
+sudo ./build/vpn_server
 ```
 
-# Execution (Requires root for TUN device creation)
-sudo ./vpn_server
+### Running a node with a config file (M3)
+
+```bash
+sudo mkdir -p /etc/cppvpn
+sudo ./build/vpn_server --gen-key /etc/cppvpn/node.key        # once; prints the node public key
+sudo cp deploy/node.conf.example /etc/cppvpn/node.conf         # edit id, port, tun_cidr …
+sudo ./build/vpn_server --check-config                         # validate, print effective config
+sudo ./build/vpn_server                                        # reads /etc/cppvpn/node.conf
+sudo ./build/vpn_server --set node.port=6000                   # one-off override
+```
+
+- **Without a config file** the server runs with the built-in defaults, as before M3 (port 5555, `tun0` configured externally, pool 10.8.0.2–10.8.0.101).
+- **With `tun_cidr`** the server sets the `tun0` address itself. NAT (MASQUERADE) and the firewall stay part of the deployment.
+- **Reference:** every key is documented in [deploy/node.conf.example](deploy/node.conf.example); `vpn_server --help` lists the options.
+
+The legacy script [scripts/runbuild.sh](scripts/runbuild.sh) builds without a build type (`-O2`). Release builds add `-O3` ([experiment 002](experiments/002-crypto-bench-backends/README.md)).
+
 ---
 
 ## 📫 Professional Contact

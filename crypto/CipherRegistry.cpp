@@ -3,7 +3,12 @@
 #include <algorithm>
 #include <cstring>
 
+#include "crypto/backends/AeadLock.h"
+#include "crypto/backends/SodiumAead.h"
 #include "crypto/backends/XorBackend.h"
+#if CPPVPN_WITH_OPENSSL
+#include "crypto/backends/OpenSslAead.h"
+#endif
 
 namespace crypto
 {
@@ -11,9 +16,21 @@ namespace crypto
 CipherRegistry &CipherRegistry::instance()
 {
     static CipherRegistry registry = [] {
+        // Registration order = default implementation per algorithm (first wins) and the
+        // algorithm preference order of algorithms(): ChaCha20-Poly1305, AES-256-GCM, xor.
         CipherRegistry r;
-        r.add(std::make_unique<XorBackend>());
-        // M2: libsodium ChaCha20-Poly1305 / AES-256-GCM register here (WITH_LIBSODIUM)
+        const bool sodium = sodiumReady();
+        if (sodium)
+            r.add(std::make_unique<AeadBackend<SodiumChaCha20Poly1305>>());
+#if CPPVPN_WITH_OPENSSL
+        r.add(std::make_unique<AeadBackend<OpenSslChaCha20Poly1305>>());
+#endif
+        if (sodium && sodiumAes256GcmAvailable()) // runtime gate: hardware AES only
+            r.add(std::make_unique<AeadBackend<SodiumAes256Gcm>>());
+#if CPPVPN_WITH_OPENSSL
+        r.add(std::make_unique<AeadBackend<OpenSslAes256Gcm>>());
+#endif
+        r.add(std::make_unique<XorBackend>()); // insecure; protocol v1 only
         return r;
     }();
     return registry;

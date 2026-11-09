@@ -12,6 +12,16 @@
 
 using namespace crypto;
 
+namespace crypto
+{
+// Prints the parameter as "algorithm/impl" (found by ADL), so CTest names are stable across
+// runs instead of containing a pointer value.
+void PrintTo(const CipherBackend *b, std::ostream *os)
+{
+    *os << b->algorithmName() << "/" << b->implName();
+}
+} // namespace crypto
+
 namespace
 {
 
@@ -100,6 +110,19 @@ TEST_P(SessionLockContract, AeadRejectsTamperedCiphertextTagAadAndCounter)
     bad_aad[0] ^= 1; // header
     EXPECT_FALSE(lock_->open(1, bad_aad.data(), bad_aad.size(), ct.data(), ct.size(), out.data()));
     EXPECT_FALSE(lock_->open(2, aad.data(), aad.size(), ct.data(), ct.size(), out.data())); // counter
+}
+
+// The counter is the nonce (C1): the same plaintext under two counters must not repeat.
+TEST_P(SessionLockContract, AeadDistinctCountersGiveDistinctCiphertext)
+{
+    if (lock_->overhead() == 0)
+        GTEST_SKIP() << "xor ignores the counter";
+    const auto pt = bytes(64, 3);
+    std::vector<uint8_t> c1(pt.size() + lock_->overhead()), c2(c1.size());
+    lock_->seal(1, nullptr, 0, pt.data(), pt.size(), c1.data());
+    lock_->seal(2, nullptr, 0, pt.data(), pt.size(), c2.data());
+    EXPECT_NE(c1, c2);
+    EXPECT_NE(std::vector<uint8_t>(c1.begin(), c1.begin() + 64), pt) << "output is not encrypted";
 }
 
 TEST_P(SessionLockContract, AeadRejectsInputShorterThanTag)

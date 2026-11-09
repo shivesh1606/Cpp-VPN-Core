@@ -1,0 +1,47 @@
+; node.conf - Cpp-VPN-Core node configuration (plan Discussion 4a, decisions N2-N5)
+;
+; Location: /etc/cppvpn/node.conf (read automatically if present), or vpn_server --config PATH.
+; Precedence: built-in defaults < this file < command line (--set section.key=value).
+; Check before (re)starting:   vpn_server --config /etc/cppvpn/node.conf --check-config
+; Changes need a restart (N4). Clients reconnect on their own.
+;
+; Syntax: [section], key = value, comments with ';' or '#' (inline comments need a space before).
+; Unknown sections or keys are errors, so typos are caught at startup.
+; This file is checked by the unit test NodeConfigExample.DeployExampleIsValid.
+
+[node]
+id        = in-1                       ; short node name, used in logs (1-32 chars)
+port      = 5555                       ; UDP port clients connect to
+node_key  = /etc/cppvpn/node.key       ; X25519 identity, mode 0600. Create it once with:
+                                       ;   vpn_server --gen-key /etc/cppvpn/node.key
+                                       ; Required when a config file is used. Back it up: a new
+                                       ; key changes the node's public key and breaks bundles.
+; tags    = friends, region-in         ; access tags for tickets (design 03 section 3) - from M5
+
+[tunnel]
+tun_name  = tun0                       ; TUN interface name (max 15 chars)
+tun_cidr  = 10.8.0.1/24                ; the server sets this address on tun_name and brings it up;
+                                       ; clients get server+1 .. broadcast-1 (.2 .. .254 here).
+                                       ; Prefix /16../30. Leave unset to configure tun0 yourself
+                                       ; (then the pool is the legacy 10.8.0.2 .. 10.8.0.101).
+mtu       = 1420                       ; applied with tun_cidr (design 01 section 3: 1420)
+
+[crypto]                               ; design 01 section 2.3 - takes effect with protocol v2 (M4)
+algorithms            = chacha20poly1305, aes256gcm   ; server preference order
+impl.chacha20poly1305 = libsodium      ; or openssl (if built with -DWITH_OPENSSL=ON)
+; impl.aes256gcm      = openssl        ; libsodium needs hardware AES; openssl works everywhere
+allow_insecure_xor    = false          ; true only for benchmarks; 'xor' in algorithms needs it
+
+[auth]                                 ; design 02 section 7, design 03
+mode = open                            ; open only, for now. allowlist (M4) and ticket (M5) are
+                                       ; rejected until implemented, so this file can never claim
+                                       ; protection the binary does not provide.
+; allowed_clients = /etc/cppvpn/allowed_clients   ; M4: client public keys, one per line
+; issuer_pk.1     = <base64url Ed25519 public key> ; M5: ticket issuer key, by key_id 1..255
+; revocation_url  = https://raw.githubusercontent.com/<owner>/<repo>/main/revocations.bin  ; M5
+
+[timers]                               ; design 02 section 7
+pending_expiry_s = 10                  ; drop handshakes not completed within this time
+dead_after_s     = 60                  ; protocol v1: remove clients idle this long
+rekey_after_s    = 120                 ; protocol v2 (M4): new handshake after this time
+reject_after_s   = 180                 ; protocol v2 (M4): refuse a session key older than this

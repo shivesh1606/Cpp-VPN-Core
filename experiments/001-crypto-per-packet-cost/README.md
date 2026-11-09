@@ -3,12 +3,13 @@
 | | |
 |---|---|
 | **Date** | 2026-11-08 |
-| **Status** | Done on a dev laptop. Runs on target nodes are pending (experiment 002). |
+| **Status** | Done on a dev laptop. Target-node runs moved to experiment 002, where they are deferred. |
+| **Note (2026-11-08, from 002)** | The `-O2` XOR row matches builds without a build type (`scripts/runbuild.sh`). The Docker image builds `Release`, where CMake appends `-O3`, so its XOR is the vectorized `-O3` row. |
 | **Informs** | [Design 01: cipher layer](../../docs/design/01-cipher-layer.md) §5.1; [Design 02: handshake](../../docs/design/02-handshake.md) (handshake cost) |
 
 ## Question
 
-How much CPU time per data packet does replacing the current 1-byte XOR ([crypto/XorCipher.cpp](../../crypto/XorCipher.cpp)) with an AEAD cipher add? How does that compare with the kernel cost of moving the packet?
+How much CPU time per data packet does replacing the current 1-byte XOR ([crypto/XorCipher.cpp @ 76f900c](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp), now `XorBackend`) with an AEAD cipher add? How does that compare with the kernel cost of moving the packet?
 
 ## Hypothesis
 

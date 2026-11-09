@@ -2,28 +2,30 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (2026-11-08) |
+| **Status** | Accepted (2026-11-08). Implemented through rollout step 2, plus step 4 (OpenSSL), in milestones M1–M2 ([plan](../plan/implementation-plan.md)). On the wire from M4. |
 | **Scope** | Per-packet encryption of tunnel traffic (server engine + Android client) |
 | **Depends on** | [02 — Handshake](README.md#index) (provides the session keys) |
-| **Replaces** | `XorCipher` single-byte XOR ([crypto/XorCipher.cpp](../../crypto/XorCipher.cpp)) |
+| **Replaces** | `XorCipher` single-byte XOR ([crypto/XorCipher.cpp @ 76f900c](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp); removed in M1, now `XorBackend` for protocol v1 only) |
 
 ---
 
-## 1. Context: current implementation
+## 1. Context: implementation before this design (`master` @ `76f900c`)
+
+Links in this section point to that commit. Since M1, the XOR cipher sits behind `SessionLock` as [XorBackend](../../crypto/backends/XorBackend.h); protocol v1 on the wire is unchanged until M4.
 
 | Aspect | Current code | Problem |
 |---|---|---|
-| Cipher | `result[i] = data[i] ^ xorkey` ([crypto/XorCipher.cpp:5-6](../../crypto/XorCipher.cpp#L5-L6)) | 1-byte key, 256-value keyspace. Brute-forced by testing for an IPv4 first byte `0x45`. |
-| Key | `uint8_t xor_key` per client ([sessions/client/Client_Manager.h:24](../../sessions/client/Client_Manager.h#L24)) | Derived from DH with `P=127` ([crypto/DiffieHellman.h:7-8](../../crypto/DiffieHellman.h#L7-L8)) |
-| Integrity | None | Forged or modified packets are accepted. A spoofed `PKT_DATA` carrying a guessed `session_id` triggers roaming ([main.cpp:49-60](../../main.cpp#L49-L60)) and redirects the victim's downstream traffic. |
-| Call sites | decrypt [main.cpp:75](../../main.cpp#L75), encrypt [main.cpp:449](../../main.cpp#L449) | Hard-wired to the singleton `XorCipher::getInstance()` |
+| Cipher | `result[i] = data[i] ^ xorkey` ([crypto/XorCipher.cpp:5-6](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp#L5-L6)) | 1-byte key, 256-value keyspace. Brute-forced by testing for an IPv4 first byte `0x45`. |
+| Key | `uint8_t xor_key` per client ([sessions/client/Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24)) | Derived from DH with `P=127` ([crypto/DiffieHellman.h:7-8](../../crypto/DiffieHellman.h#L7-L8)) |
+| Integrity | None | Forged or modified packets are accepted. A spoofed `PKT_DATA` carrying a guessed `session_id` triggers roaming ([main.cpp:49-60](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L49-L60); still true on v1 today, at [main.cpp:57-68](../../main.cpp#L57-L68)) and redirects the victim's downstream traffic. |
+| Call sites | decrypt [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75), encrypt [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | Hard-wired to the singleton `XorCipher::getInstance()` |
 
 ## 2. Decision
 
 Replace XOR with an **AEAD** transport cipher behind an interface with three levels of selection:
 
 ```
-compile time   CMake: WITH_LIBSODIUM=ON (mandatory), WITH_OPENSSL=ON (optional), ...
+compile time   CMake: libsodium (always, required), WITH_OPENSSL=ON (optional), ...
                  → which implementations EXIST in the binary (a single binary may hold several)
 startup        node.conf: implementation chosen per algorithm
                  → which library runs (no rebuild)
@@ -85,6 +87,30 @@ public:
 
 Each session holds two locks: `rx` keyed with `k_c2s` and `tx` keyed with `k_s2c` (key derivation: doc 02).
 
+**As implemented (M2).** All AEAD backends share one generic lock, so the nonce rule (C1) and the tag handling exist once:
+
+```
+CipherBackend ◀── AeadBackend<P>  ──newLock()──▶  AeadLock<P> : SessionLock
+                                                    seal(ctr,…): counterNonce(ctr) → P.seal(nonce,…)
+                                                    open(ctr,…): len ≥ 16 ? P.open(nonce,…) : false
+P (primitive, 12-byte nonce in, no counter logic):
+  SodiumChaCha20Poly1305   crypto_aead_chacha20poly1305_ietf_*        always
+  SodiumAes256Gcm          crypto_aead_aes256gcm_*_afternm            if crypto_aead_aes256gcm_is_available()
+  OpenSslChaCha20Poly1305  EVP_chacha20_poly1305()                    -DWITH_OPENSSL=ON
+  OpenSslAes256Gcm         EVP_aes_256_gcm()                          -DWITH_OPENSSL=ON
+```
+
+| File | Content |
+|---|---|
+| [crypto/backends/AeadLock.h](../../crypto/backends/AeadLock.h) | `counterNonce`, `AeadLock<P>`, `AeadBackend<P>`; the primitive contract |
+| [crypto/backends/SodiumAead.{h,cpp}](../../crypto/backends/SodiumAead.h) | libsodium primitives; `sodiumReady()`, `sodiumAes256GcmAvailable()` |
+| [crypto/backends/OpenSslAead.{h,cpp}](../../crypto/backends/OpenSslAead.h) | OpenSSL EVP primitives; two pre-keyed `EVP_CIPHER_CTX` per lock (C3) |
+| [crypto/CipherRegistry.cpp](../../crypto/CipherRegistry.cpp) | Registration order = default implementation and offer order: ChaCha20-Poly1305 (libsodium, openssl), AES-256-GCM (libsodium, openssl), xor |
+
+- **Fail closed:** `seal()` stays `void`. If a library call fails internally (OpenSSL only; libsodium's calls cannot fail), the output is zero-filled, so the peer rejects the packet. On a failed `open()`, OpenSSL's already-decrypted bytes are wiped.
+- **Key hygiene:** the key and the AES key schedule are zeroed on destruction (`sodium_memzero`, `EVP_CIPHER_CTX_free`).
+- **Build:** libsodium is required and linked statically. OpenSSL (`-DWITH_OPENSSL=ON`, static `libcrypto.a`) is optional; the Docker build enables it.
+
 ### 2.3 Configuration (`node.conf`)
 
 ```ini
@@ -96,6 +122,14 @@ allow_insecure_xor    = false                         # true only for baseline b
 ```
 
 Negotiation rule: the server selects the first entry of `algorithms` that is also in the client's `cipher_offer[]`. If there's no intersection, the handshake fails.
+
+**Status (M3):**
+- The `[crypto]` keys are parsed and validated against the registry of the running binary ([config/NodeConfig.cpp](../../config/NodeConfig.cpp)):
+  - unknown algorithms or implementations are startup errors;
+  - `impl.X = openssl` needs `-DWITH_OPENSSL=ON`;
+  - `xor` needs `allow_insecure_xor = true`.
+- Negotiation and `impl.*` selection take effect with protocol v2 (M4). Until then the server warns that these keys are not used yet.
+- All keys are documented in [deploy/node.conf.example](../../deploy/node.conf.example).
 
 ### 2.4 Out of scope (fixed, not pluggable)
 
@@ -116,16 +150,16 @@ Wire cost: 16-byte tag per packet, plus the v2 header (14 B, up from 5 B). Inner
 
 ## 4. Code change map
 
-| Area | Current | Change |
-|---|---|---|
-| Cipher class | [crypto/XorCipher.h](../../crypto/XorCipher.h), [crypto/XorCipher.cpp](../../crypto/XorCipher.cpp) | Becomes `XorBackend` (id 0). Add `crypto/SessionLock.h`, `crypto/CipherRegistry.{h,cpp}`, `crypto/backends/*` |
-| Client state | `uint8_t xor_key` ([Client_Manager.h:24](../../sessions/client/Client_Manager.h#L24)) | `std::unique_ptr<SessionLock> rx, tx; uint64_t tx_counter; ReplayWindow rx_window;` |
-| RX path | `enc.crypt(...)` [main.cpp:75](../../main.cpp#L75) | `client->rx->open(...)`; on `false`, drop and count `auth_fail` |
-| TX path | `enc.crypt(...)` [main.cpp:449](../../main.cpp#L449) | `client->tx->seal(client->tx_counter++, ...)` |
-| Build | [CMakeLists.txt:37-53](../../CMakeLists.txt#L37-L53) | `WITH_LIBSODIUM` (required, static link), `WITH_OPENSSL` (optional); new `crypto_bench` target |
-| Docker | [Dockerfile:3-7](../../Dockerfile#L3-L7) | `apt-get install libsodium-dev` (static `libsodium.a`), optionally `libssl-dev` |
-| Stats | `enc_cycles`/`dec_cycles` ([utils/counter_definition.h:62-63](../../utils/counter_definition.h#L62-L63)) | Unchanged; works for any backend. Add an `auth_fail` counter. |
-| Android | XOR in `MyVpnService.kt` | Kotlin `SessionLock` interface; default implementation on [Lazysodium][lazysodium] |
+| Area | Before (`76f900c`) | Change | Status |
+|---|---|---|---|
+| Cipher class | [crypto/XorCipher.h](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.h), [crypto/XorCipher.cpp](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/crypto/XorCipher.cpp) | Becomes `XorBackend` (id 0). Add `crypto/SessionLock.h`, `crypto/CipherRegistry.{h,cpp}`, `crypto/backends/*` | Done (M1, M2) |
+| Client state | `uint8_t xor_key` ([Client_Manager.h:24](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/sessions/client/Client_Manager.h#L24)) | `std::unique_ptr<SessionLock> rx, tx; uint64_t tx_counter; ReplayWindow rx_window;` | Locks and counter done in M1 ([Client_Manager.h](../../sessions/client/Client_Manager.h)); replay window in M4 |
+| RX path | `enc.crypt(...)` [main.cpp:75](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L75) | `client->rx->open(...)`; on `false`, drop and count `auth_fail` | Done (M1): [main.cpp:91](../../main.cpp#L91), counter `rx_auth_fail` |
+| TX path | `enc.crypt(...)` [main.cpp:449](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/main.cpp#L449) | `client->tx->seal(client->tx_counter++, ...)` | Done (M1): [main.cpp:636](../../main.cpp#L636) |
+| Build | [CMakeLists.txt:37-53](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/CMakeLists.txt#L37-L53) | libsodium required (static link), `WITH_OPENSSL` (optional); new `crypto_bench` target | Done (M2). libsodium is unconditional; there is no `WITH_LIBSODIUM` switch |
+| Docker | [Dockerfile:3-7](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/Dockerfile#L3-L7) | `apt-get install libsodium-dev` (static `libsodium.a`), optionally `libssl-dev` | Done (M2). Both installed; image built with `-DWITH_OPENSSL=ON` |
+| Stats | `enc_cycles`/`dec_cycles` ([utils/counter_definition.h:62-63](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/utils/counter_definition.h#L62-L63)) | Unchanged; works for any backend. Add an `auth_fail` counter. | Done (M1): `rx_auth_fail`, `udp_rx_truncated` |
+| Android | XOR in `MyVpnService.kt` | Kotlin `SessionLock` interface; default implementation on [Lazysodium][lazysodium] | M6 |
 
 ## 5. Benchmark plan
 
@@ -140,7 +174,8 @@ chacha20poly1305/openssl         1400   ...          ...           ...
 aes256gcm/openssl                1400   ...          ...           ...
 ```
 
-- Timing uses `RDTSC()` from [utils/profiling.h](../../utils/profiling.h).
+- Implemented in [tools/crypto_bench.cpp](../../tools/crypto_bench.cpp). It times the real `SessionLock` objects (one virtual call, 14-byte AAD, counter nonce), so a new backend is benchmarked as soon as it is registered. Ops: `seal`, `open`, `open-forged` (flipped tag). Median of `--runs` rounds, with spread.
+- Timing uses `CLOCK_MONOTONIC` and `__rdtsc()` directly, not `RDTSC()` from [utils/profiling.h](../../utils/profiling.h), which is compiled out unless `ENABLE_PROFILING=ON`. On arm64 only ns are reported.
 - Live in-server comparison: swap `impl.*` in `node.conf` and read `enc_cyc_per_pkt` / `dec_cyc_per_pkt` from the stats log.
 
 ### 5.1 Baseline measurements (2026-11-08, pre-implementation)
@@ -184,12 +219,28 @@ Mean cost per operation in ns:
 
 Re-run these numbers on target node hardware once `crypto_bench` exists. Free-tier shared-core VMs will be slower.
 
+### 5.2 `crypto_bench` results (2026-11-08, M2)
+
+Same laptop, now through the engine's `SessionLock` code, with all four AEAD backends. Full data and method: [experiments/002-crypto-bench-backends](../../experiments/002-crypto-bench-backends/README.md).
+
+| Median ns per op, Release build | seal 64 B | seal 1400 B | open 1400 B | forged 1400 B |
+|---|---|---|---|---|
+| chacha20poly1305 / libsodium | 300 | 1217 | 1242 | 566 |
+| chacha20poly1305 / openssl | 357 | 885 | 903 | 905 |
+| aes256gcm / libsodium | 134 | 704 | 760 | 305 |
+| aes256gcm / openssl | 204 | 483 | 448 | 456 |
+| xor / builtin (`-O3`, as in the Docker image) | 5 | 41 | 38 | — |
+
+- **Library choice depends on packet size.** OpenSSL is cheaper at 1400 B; libsodium is cheaper at 64 B and drops forged packets at about half the cost of a valid open, because it checks the tag first. The default stays libsodium until target-node data exists; M3's `impl.*` switches it without a rebuild.
+- **Mixing libraries needed a fix.** OpenSSL's AVX code slowed the libsodium AES-NI code that ran after it by 1.7×. The OpenSSL backend now issues `vzeroupper` after each call ([VectorState.h](../../crypto/backends/VectorState.h)).
+- **Release builds are `-O3`.** The production XOR baseline is 41 ns, not the `-O2` 511 ns in §5.1.
+
 ## 6. Rollout
 
-1. Introduce `SessionLock`/`CipherBackend`/`CipherRegistry`, and move XOR behind it as id 0. No wire change; existing clients keep working.
-2. Add the libsodium ChaCha20-Poly1305 backend, the KAT tests and `crypto_bench`.
-3. Enable on the wire together with protocol v2 (doc 02): v2 header, negotiation fields, replay window.
-4. Optional: OpenSSL backends for comparison.
+1. Introduce `SessionLock`/`CipherBackend`/`CipherRegistry`, and move XOR behind it as id 0. No wire change; existing clients keep working. **Done (M1).**
+2. Add the libsodium ChaCha20-Poly1305 backend, the KAT tests and `crypto_bench`. **Done (M2)**, together with libsodium AES-256-GCM.
+3. Enable on the wire together with protocol v2 (doc 02): v2 header, negotiation fields, replay window. *(M4)*
+4. Optional: OpenSSL backends for comparison. **Done (M2)**, behind `-DWITH_OPENSSL=ON`.
 
 ## References
 

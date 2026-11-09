@@ -4,6 +4,18 @@
 server=127.0.0.1
 port=5555
 
+# v1 (XOR, insecure) | v2 (Noise IK + AEAD, design 02)
+protocol=v1
+# v2: the node's public key (on the node: vpn_server --pubkey /etc/cppvpn/node.key)
+# server_pub=
+# v2: this client's key file (vpn_client --gen-key client.key); its public key goes into the
+# node's /etc/cppvpn/allowed_clients
+client_key=client.key
+# v2: ciphers offered, in preference order
+offer=chacha20poly1305,aes256gcm
+# v2: start a new handshake after this many seconds (design 02 section 7)
+rekey_after=120
+
 # error | warn | info | debug
 log_level=info
 # log_file=vpn_client.log

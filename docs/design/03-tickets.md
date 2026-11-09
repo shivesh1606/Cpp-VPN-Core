@@ -5,7 +5,7 @@
 | **Status** | Accepted (2026-11-08) |
 | **Scope** | Authorization of clients to nodes: ticket format, issuance (Phase 0 CLI, Phase 1 serverless), verification, revocation, issuer key lifecycle, Phase 0 bundle |
 | **Used by** | [02 — Handshake](02-handshake.md) §5 step 5 (`auth_mode = ticket`) |
-| **Replaces** | Nothing: today any client that reaches UDP 5555 is accepted ([main.cpp:121-202](../../main.cpp#L121-L202)) |
+| **Replaces** | The interim v2 allowlist (`auth.mode = allowlist`, M4: a static list of client keys per node). Protocol v1 still accepts any client that reaches UDP 5555 ([main.cpp:124-205](../../main.cpp#L124-L205)) |
 
 ## Decisions
 

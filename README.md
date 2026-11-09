@@ -52,21 +52,23 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 * **Language:** C++17 (Focus on performance and RAII)
 * **Build System:** CMake (With modular profiling toggles)
 * **Network Interfaces:** Linux TUN/TAP, UDP Sockets
-* **Cryptography:** Diffie-Hellman key exchange and XOR stream cipher (protocol v1 placeholders); pluggable AEAD cipher layer with libsodium and OpenSSL backends (ChaCha20-Poly1305, AES-256-GCM), on the wire with protocol v2
+* **Cryptography:** protocol v2 with a Noise_IK_25519_ChaChaPoly_BLAKE2b handshake, a pluggable AEAD transport (libsodium/OpenSSL ChaCha20-Poly1305, AES-256-GCM) and an RFC 6479 replay window; protocol v1 (toy Diffie-Hellman + XOR) kept for old clients
 * **System Utilities:** `recvmmsg`, `sendmmsg`, `fcntl`, `ioctl`
 
 ---
 
 ## 🧭 Design Documents & Roadmap
 
-> **Security status:** on the wire, protocol v1 still uses the placeholder XOR cipher and small-parameter Diffie-Hellman. They don't provide confidentiality, integrity, or client authentication. The replacement AEAD ciphers (libsodium ChaCha20-Poly1305 / AES-256-GCM, optional OpenSSL) are built and tested since M2 ([crypto/backends/](crypto/backends/)). They go on the wire with protocol v2 (M4).
+> **Security status:**
+> - **Protocol v2** (M4): a Noise IK handshake (X25519, BLAKE2b) authenticates both the server and the client, and every packet is AEAD-encrypted (ChaCha20-Poly1305 or AES-256-GCM). Clients are admitted by an allowlist of public keys. It runs whenever the node has a key, i.e. when a config file is used ([design 02](docs/design/02-handshake.md)).
+> - **Protocol v1** (XOR, toy Diffie-Hellman) gives **no** confidentiality, integrity or authentication. It stays enabled for the current Android app until it moves to v2 (M6); turn it off with `node.accept_v1 = false`.
 
 Target designs and their rationale are in [docs/design/](docs/design/README.md):
 
 | # | Document | Status | Implementation |
 |---|---|---|---|
-| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted | M1–M2 done; on the wire in M4 |
-| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted | M4 |
+| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted | Done (M1–M2), on the wire since M4 |
+| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted | Done in M4 (allowlist auth; tickets in M5) |
 | 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted | M5 |
 | 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked | 4a done in M3 |
 
@@ -122,7 +124,14 @@ sudo ./build/vpn_server                                        # reads /etc/cppv
 sudo ./build/vpn_server --set node.port=6000                   # one-off override
 ```
 
-- **Without a config file** the server runs with the built-in defaults, as before M3 (port 5555, `tun0` configured externally, pool 10.8.0.2–10.8.0.101).
+- **Without a config file** the server runs with the built-in defaults, as before M3: port 5555, `tun0` configured externally, pool 10.8.0.2–10.8.0.101, and **protocol v1 only**.
+- **Protocol v2 clients** are allowed by public key. Add each one to `/etc/cppvpn/allowed_clients`, one `<key> [name]` per line, then restart:
+  ```bash
+  ./build/vpn_client_v2 --gen-key client.key              # Linux test client; prints the key to allow
+  ./build/vpn_client_v2 --key client.key --server-pub "$(sudo ./build/vpn_server --pubkey /etc/cppvpn/node.key)" \
+      --host <node-ip> --ping 10.8.0.1 --rekey             # handshake, ping through the tunnel, rekey, BYE
+  ```
+  The Windows client does the same with `--protocol v2` ([clients/windows](clients/windows/README.md)).
 - **With `tun_cidr`** the server sets the `tun0` address itself. NAT (MASQUERADE) and the firewall stay part of the deployment.
 - **Reference:** every key is documented in [deploy/node.conf.example](deploy/node.conf.example); `vpn_server --help` lists the options.
 

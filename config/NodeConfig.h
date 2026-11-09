@@ -5,9 +5,10 @@
 // without a config file behaves as before.
 //
 // Unknown sections or keys are errors (typos must not be silently ignored). Keys that only
-// take effect with protocol v2 (M4) or tickets (M5) are validated now and produce a warning
-// that they are not active yet. Auth modes other than "open" are rejected until implemented,
-// so a config can never claim protection the binary does not provide.
+// take effect with tickets (M5) are validated now and produce a warning that they are not
+// active yet. auth.mode "ticket" is rejected until M5 and "open" unless the
+// binary is built with -DALLOW_OPEN_AUTH=ON, so a config can never claim protection the binary
+// does not provide, nor silently run without client authentication.
 #ifndef CONFIG_NODECONFIG_H
 #define CONFIG_NODECONFIG_H
 
@@ -23,6 +24,7 @@ namespace config
 
 constexpr const char *kDefaultConfigPath = "/etc/cppvpn/node.conf";
 constexpr const char *kDefaultNodeKeyPath = "/etc/cppvpn/node.key";
+constexpr const char *kDefaultAllowedClientsPath = "/etc/cppvpn/allowed_clients";
 
 struct NodeConfig
 {
@@ -35,6 +37,7 @@ struct NodeConfig
     std::vector<std::string> tags; // design 03 section 3 (used from M5)
     uint16_t port = 5555;
     std::string node_key; // empty = no node identity (allowed only without a config file)
+    bool accept_v1 = true; // protocol v1 (XOR, unauthenticated) for not-yet-updated clients
 
     // [tunnel]
     std::string tun_name = "tun0";
@@ -45,22 +48,25 @@ struct NodeConfig
     uint32_t pool_start = 0x0A080002; // 10.8.0.2
     uint32_t pool_size = 100;
 
-    // [crypto] (design 01 section 2.3; negotiation from M4)
+    // [crypto] (design 01 section 2.3): protocol v2 negotiation
     std::vector<std::string> algorithms{"chacha20poly1305", "aes256gcm"};
     std::map<std::string, std::string> impl; // algorithm name -> implementation name
     bool allow_insecure_xor = false;
 
     // [auth] (design 02 section 7, design 03)
-    std::string auth_mode = "open";
-    std::string allowed_clients;
+    std::string auth_mode = "allowlist"; // protocol v2 client authentication
+    std::string allowed_clients;          // file of client public keys (allowlist mode)
+    std::vector<std::string> allowed_keys; // loaded from allowed_clients: 32-byte keys
+    std::map<std::string, std::string> allowed_names; // key -> name from the file (logging)
     std::map<int, std::string> issuer_pk; // key_id -> base64url Ed25519 public key
     std::string revocation_url;
 
     // [timers] (design 02 section 7)
     int pending_expiry_s = 10; // pending handshake expiry (v1 and v2)
-    int dead_after_s = 60;     // v1 idle sweep; replaced by reject_after_s in M4
-    int rekey_after_s = 120;   // M4
-    int reject_after_s = 180;  // M4
+    int dead_after_s = 60;     // protocol v1 idle sweep (v2 uses reject_after_s)
+    int keepalive_s = 15;      // sent to v2 clients in HS_RESP; server keepalive interval
+    int rekey_after_s = 120;   // v2 clients rekey after this; must be < reject_after_s
+    int reject_after_s = 180;  // v2: drop session keys older than this / idle sessions
 };
 
 struct ConfigReport
@@ -79,9 +85,13 @@ bool parseOverride(const std::string &text, std::string &section, std::string &k
 void applyIni(const IniFile &ini, NodeConfig &cfg, ConfigReport &report);
 
 // Builds the effective config: defaults, then the file at `path` (if non-empty), then the
-// overrides. When a file is used and node_key is unset, it defaults to kDefaultNodeKeyPath.
+// overrides. When a file is used, node_key and allowed_clients default to their /etc/cppvpn
+// paths, and in allowlist mode the allowed_clients file is loaded and validated.
 NodeConfig loadNodeConfig(const std::string &path, const std::vector<std::string> &overrides,
                           ConfigReport &report);
+
+// Reads an allowed_clients file: one "<base64url public key> [name]" per line, '#' comments.
+bool loadAllowedClients(const std::string &path, NodeConfig &cfg, ConfigReport &report);
 
 // Human-readable effective configuration (for --check-config and the startup log).
 std::string describe(const NodeConfig &cfg);

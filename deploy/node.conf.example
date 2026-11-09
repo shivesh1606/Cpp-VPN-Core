@@ -16,6 +16,9 @@ node_key  = /etc/cppvpn/node.key       ; X25519 identity, mode 0600. Create it o
                                        ;   vpn_server --gen-key /etc/cppvpn/node.key
                                        ; Required when a config file is used. Back it up: a new
                                        ; key changes the node's public key and breaks bundles.
+accept_v1 = true                       ; also serve protocol v1 (XOR, NO authentication) for clients
+                                       ; that are not updated yet (Android before M6). Set false
+                                       ; once every client speaks v2.
 ; tags    = friends, region-in         ; access tags for tickets (design 03 section 3) - from M5
 
 [tunnel]
@@ -26,22 +29,29 @@ tun_cidr  = 10.8.0.1/24                ; the server sets this address on tun_nam
                                        ; (then the pool is the legacy 10.8.0.2 .. 10.8.0.101).
 mtu       = 1420                       ; applied with tun_cidr (design 01 section 3: 1420)
 
-[crypto]                               ; design 01 section 2.3 - takes effect with protocol v2 (M4)
+[crypto]                               ; design 01 section 2.3 - protocol v2 cipher negotiation
 algorithms            = chacha20poly1305, aes256gcm   ; server preference order
 impl.chacha20poly1305 = libsodium      ; or openssl (if built with -DWITH_OPENSSL=ON)
 ; impl.aes256gcm      = openssl        ; libsodium needs hardware AES; openssl works everywhere
 allow_insecure_xor    = false          ; true only for benchmarks; 'xor' in algorithms needs it
 
-[auth]                                 ; design 02 section 7, design 03
-mode = open                            ; open only, for now. allowlist (M4) and ticket (M5) are
-                                       ; rejected until implemented, so this file can never claim
-                                       ; protection the binary does not provide.
-; allowed_clients = /etc/cppvpn/allowed_clients   ; M4: client public keys, one per line
+[auth]                                 ; design 02 section 7, design 03 - protocol v2 clients
+mode            = allowlist            ; allowlist: only keys in allowed_clients may connect.
+                                       ; ticket (M5) is rejected until implemented; open (any key)
+                                       ; only in builds with -DALLOW_OPEN_AUTH=ON (development).
+allowed_clients = /etc/cppvpn/allowed_clients  ; one client public key per line, optional name:
+                                       ;   <43-char public key>  my-laptop      # comment
+                                       ; client key: vpn_client_v2 --gen-key FILE (Linux test
+                                       ; client) or vpn_client.exe --gen-key FILE (Windows)
+                                       ; (may be empty; restart the server after editing, N4)
 ; issuer_pk.1     = <base64url Ed25519 public key> ; M5: ticket issuer key, by key_id 1..255
 ; revocation_url  = https://raw.githubusercontent.com/<owner>/<repo>/main/revocations.bin  ; M5
 
 [timers]                               ; design 02 section 7
-pending_expiry_s = 10                  ; drop handshakes not completed within this time
+pending_expiry_s = 10                  ; drop handshakes not confirmed (ACK/DATA) within this time
 dead_after_s     = 60                  ; protocol v1: remove clients idle this long
-rekey_after_s    = 120                 ; protocol v2 (M4): new handshake after this time
-reject_after_s   = 180                 ; protocol v2 (M4): refuse a session key older than this
+keepalive_s      = 15                  ; v2: told to clients in HS_RESP; server sends KEEPALIVE
+                                       ; after this long without traffic (0 = off)
+rekey_after_s    = 120                 ; v2: clients start a new handshake after this time
+reject_after_s   = 180                 ; v2: drop session keys older than this, and sessions
+                                       ; without an authenticated packet for this long

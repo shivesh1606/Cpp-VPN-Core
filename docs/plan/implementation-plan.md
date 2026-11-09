@@ -30,7 +30,7 @@ M3 Node config & identity ────┴─────────────
 | M1 | Cipher-layer refactor, no wire change, plus hardening fixes H1–H2 | **In review** (branch `feature/m1-cipher-layer`) | — |
 | M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | **In review** (branch `feature/m2-libsodium`); experiment 002 target-node runs deferred (2026-11-08) | M1 |
 | M3 | Node config file and node identity key | **In review** (branch `feature/m3-node-config`) | — |
-| M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | Not started | M2, M3 |
+| M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | **In review** (branch `feature/m4-protocol-v2`); experiments 003/004 deferred | M2, M3 |
 | M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | Not started | M4 |
 | M6 | Android: v2 + tickets + QR import | Not started | M5 |
 | M7 | Retire v1; docs and README refresh | Not started | M6 |
@@ -186,12 +186,50 @@ Superseded review findings:
 - **H4:** IP reserved before authentication is fixed.
 - **H5:** spoofable roaming, BYE and KEEPALIVE are fixed.
 - **H6:** a lost ACK no longer strands the client.
-- **H7:** `DiffieHellman.h` (ODR, globals in a header) is removed.
+- **H7:** `DiffieHellman.h` (ODR, globals in a header) is removed. *(Update: kept until M7, because protocol v1 still uses it. H3 also remains for v1 clients, and its `DISABLED_` test stays until M7.)*
 
 **Acceptance**
 - The Windows client completes v2 against the Docker server.
 - Every negative test from design 02 §10.3 increments exactly one drop counter.
 - A v1 Android client still connects to the same binary.
+
+**Delivered (2026-11-09)**
+- **Noise:** [protocol/noise/Noise.h](../../protocol/noise/Noise.h) implements `Noise_IK_25519_ChaChaPoly_BLAKE2b` on libsodium (HMAC/HKDF over BLAKE2b, `CipherState`, `SymmetricState`, `HandshakeIK`). It is byte-identical to **two** published vector sets, cacophony and snow ([vector file](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt)).
+- **Wire:** [protocol/v2/Wire.h](../../protocol/v2/Wire.h) implements the §3 layouts, mac1, TAI64N and the payloads. [ReplayWindow.h](../../protocol/v2/ReplayWindow.h) is RFC 6479.
+- **Server:** [protocol/v2/Server.h](../../protocol/v2/Server.h) is a socket-free responder:
+  - the §5 pipeline, with IP allocation only at step 8;
+  - a msg2 cache for retransmits;
+  - an ACK, or the first DATA/KEEPALIVE as fallback, confirms a session;
+  - rekey keeps the IP and keeps the previous key for receiving;
+  - roaming happens only after `open()`;
+  - the inner source IP must be the client's own (anti-spoofing, added);
+  - BYE, pending expiry, reject-after, idle removal and server keepalives;
+  - a drop-reason counter for every failure, plus the `ENABLE_KEYLOG` hook.
+- **Client:** [protocol/v2/Client.h](../../protocol/v2/Client.h) is the initiator, shared by the Linux [tools/vpn_client_v2.cpp](../../tools/vpn_client_v2.cpp) and the Windows client.
+- **`main.cpp`:**
+  - the first byte demultiplexes v1 and v2 on one port and one `tun0`;
+  - v2 sealing shares the `sendmmsg` batch;
+  - a 1 s tick runs v2 timers and keepalives;
+  - a v2 stats line is logged.
+
+  v2 runs whenever the node has a key, which means a config file is in use.
+- **Config:**
+  - `auth.mode = allowlist` with an `allowed_clients` file (default), `open` only with `-DALLOW_OPEN_AUTH=ON`, `ticket` rejected until M5;
+  - `[crypto]` and the timer keys are live;
+  - new keys `node.accept_v1` and `timers.keepalive_s`;
+  - new CMake options `ALLOW_OPEN_AUTH` and `ENABLE_KEYLOG`.
+- **Windows client:** `--protocol v2 --server-pub … --key …`, `--gen-key` and `--pubkey` ([ProtocolV2.inc](../../clients/windows/ProtocolV2.inc)). Probe and tunnel modes both support rekey and keepalive. Built with MinGW and static libsodium 1.0.20.
+- **Tests:**
+  - 148 GoogleTest cases with OpenSSL, 132 without. 37 are new: Noise vectors, HMAC/HKDF, wire, replay window, and 18 in-process client↔server cases. Each §10.3 negative case increments exactly one counter and allocates no IP.
+  - e2e [run_docker_e2e.sh](../../tests/e2e/run_docker_e2e.sh): v1 with and without a config; v2 ping, rekey, lost ACK and AES-GCM; a client not on the allowlist; `accept_v1 = false`. All pass.
+- **Windows ↔ Docker server:**
+  - v2 probe: handshake in 3.2 ms; 2 rekeys (new hsid, same IP); keepalives 2 sent and 2 received; BYE.
+  - v1 probe against the same server: OK.
+- **Not done:**
+  - Windows tunnel mode, which needs an elevated terminal (as in M0).
+  - The Android v1 app, which the e2e v1 checks cover (same wire format).
+  - Experiments 003 and 004 (deferred, like the other benchmarks).
+  - mac2 cookies (P3).
 
 ## M5 — Tickets
 

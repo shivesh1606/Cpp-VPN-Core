@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <string>
 
+#include "crypto/Base64Url.h" // toBase64Url / fromBase64Url
+
 namespace crypto
 {
 
@@ -42,11 +44,6 @@ private:
     uint8_t pk_[kX25519Bytes] = {0};
     bool loaded_ = false;
 };
-
-// base64url, no padding (RFC 4648 section 5).
-std::string toBase64Url(const uint8_t *data, size_t len);
-// Decodes base64url without padding; true only if it decodes to exactly `len` bytes.
-bool fromBase64Url(const std::string &text, uint8_t *out, size_t len);
 
 // Generates a key pair and writes the private key to `path` with mode 0600 (via a temporary
 // file and rename). Refuses to replace an existing file unless `overwrite`.

@@ -7,6 +7,7 @@
 //   tunnel         DATA both ways; KEEPALIVE when idle; client-initiated rekey after rekey_after
 //                  seconds while traffic keeps flowing under the old key; reconnect on BYE/expiry
 
+#include "auth/Bundle.h"
 #include "crypto/Base64Url.h"
 #include "crypto/CipherRegistry.h"
 #include "protocol/v2/Client.h"
@@ -60,12 +61,60 @@ static bool v2LoadKey(const std::string &path, uint8_t sk[32])
     return ok;
 }
 
+// --bundle: everything a v2 connection needs, from vpnctl (design 03 section 5). The bundle holds
+// the device private key: keep the file private.
+static bool v2ApplyBundle(Config &cfg)
+{
+    if (sodium_init() < 0)
+        return false;
+    std::string text = cfg.bundle;
+    if (text.rfind(auth::kBundleUriPrefix, 0) != 0)
+    {
+        std::ifstream f(cfg.bundle, std::ios::binary);
+        if (!f)
+        {
+            LOG_E("Cannot read bundle file %s", cfg.bundle.c_str());
+            return false;
+        }
+        text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    auth::Bundle b;
+    std::string err;
+    if (!auth::bundleFromText(text, b, err))
+    {
+        LOG_E("Bundle: %s", err.c_str());
+        return false;
+    }
+    const auth::BundleNode *n = &b.nodes[0];
+    for (const auto &x : b.nodes)
+        if (x.id == cfg.node)
+            n = &x;
+    if (!cfg.node.empty() && n->id != cfg.node)
+    {
+        LOG_E("Node '%s' is not in the bundle", cfg.node.c_str());
+        return false;
+    }
+    cfg.protocol = "v2";
+    cfg.server = n->host;
+    cfg.port = n->port;
+    cfg.server_pub = crypto::toBase64Url(n->pub, 32);
+    std::memcpy(cfg.device_sk, b.device_sk, 32);
+    cfg.ticket = b.ticket;
+    cfg.from_bundle = true;
+    LOG_I("Bundle: node %s (%s:%u) of %zu, ticket %zu B", n->id.c_str(), n->host.c_str(), n->port,
+          b.nodes.size(), b.ticket.size());
+    return true;
+}
+
 static bool v2MakeClientConfig(const Config &cfg, v2::ClientConfig &cc)
 {
     if (sodium_init() < 0)
         return false;
-    if (!v2LoadKey(cfg.client_key, cc.static_priv))
+    if (cfg.from_bundle)
+        std::memcpy(cc.static_priv, cfg.device_sk, 32);
+    else if (!v2LoadKey(cfg.client_key, cc.static_priv))
         return false;
+    cc.ticket = cfg.ticket;
     if (!crypto::fromBase64Url(cfg.server_pub, cc.server_pub, 32))
     {
         LOG_E("server_pub must be the node's 43-character public key (vpn_server --pubkey on the node)");
@@ -201,8 +250,9 @@ static int runProbeV2(const Config &cfg)
     LOG_I("Client public key %s", crypto::toBase64Url(c.publicKey(), 32).c_str());
     if (!v2Handshake(sock, server, c))
     {
-        LOG_E("PROBE FAIL: no HS_RESP from %s:%d after 4 attempts (is this key in allowed_clients, "
-              "and server_pub the node's key?)", cfg.server.c_str(), cfg.port);
+        LOG_E("PROBE FAIL: no HS_RESP from %s:%d after 4 attempts. The node answers only authorized "
+              "clients: key not in allowed_clients, or ticket rejected/expired/revoked (the server log names "
+              "the reason), or server_pub is not the node's key", cfg.server.c_str(), cfg.port);
         closesocket(sock);
         return 2;
     }

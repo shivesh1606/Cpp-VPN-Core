@@ -176,10 +176,35 @@ TEST_F(NodeConfigTest, AuthModes)
     {
         EXPECT_TRUE(hasError("needs a build with -DALLOW_OPEN_AUTH=ON")) << allErrors();
     }
-    load("[auth]\nmode = ticket\n");
-    EXPECT_TRUE(hasError("'ticket' needs tickets (milestone M5)"));
+    load("[auth]\nmode = ticket\n"); // accepted, but unusable without an issuer key and tags
+    EXPECT_TRUE(hasError("auth.mode = ticket needs at least one auth.issuer_pk")) << allErrors();
+    EXPECT_TRUE(hasError("auth.mode = ticket needs node.tags"));
     load("[auth]\nmode = none\n");
     EXPECT_TRUE(hasError("expected open | allowlist | ticket"));
+}
+
+TEST_F(NodeConfigTest, TicketModeLoadsTagsAndComputesNodeMask)
+{
+    const std::string tags = dir_ + "/tags.conf";
+    std::ofstream(tags) << "0 = friends\n1 = free\n8 = region-in\n";
+    const std::string base = "[node]\ntags = friends, region-in\n[auth]\nmode = ticket\nissuer_pk.1 = " +
+                             std::string(43, 'A') + "\ntags_file = " + tags + "\n";
+    NodeConfig c = load(base + "revocation_url = https://example.org/r.bin\nrevocation_poll_s = 60\n");
+    ASSERT_TRUE(report_.ok()) << allErrors();
+    EXPECT_EQ(c.node_mask, (1u << 0) | (1u << 8));
+    EXPECT_EQ(c.revocation_file, kDefaultRevocationPath);
+    EXPECT_EQ(c.revocation_poll_s, 60);
+    EXPECT_NE(describe(c).find("mask 0x101"), std::string::npos) << describe(c);
+
+    load("[node]\ntags = gold\n[auth]\nmode = ticket\nissuer_pk.1 = " + std::string(43, 'A') +
+         "\ntags_file = " + tags + "\n");
+    EXPECT_TRUE(hasError("node.tags: unknown tag 'gold'")) << allErrors();
+    load("[node]\ntags = friends\n[auth]\nmode = ticket\nissuer_pk.1 = " + std::string(43, 'A') +
+         "\ntags_file = " + dir_ + "/missing.conf\n");
+    EXPECT_TRUE(hasError("auth.tags_file: cannot open")) << allErrors();
+    load(base + "revocation_poll_s = 5\n");
+    EXPECT_TRUE(hasError("auth.revocation_poll_s: expected an integer in 30..86400"));
+    unlink(tags.c_str());
 }
 
 TEST_F(NodeConfigTest, AllowedClientsFile)
@@ -258,7 +283,7 @@ TEST_F(NodeConfigTest, IssuerKeysAndRevocationUrl)
     load("[auth]\nissuer_pk.1 = " + std::string(43, 'A') +
          "\nrevocation_url = https://example.org/r.bin\n");
     EXPECT_TRUE(report_.ok()) << allErrors();
-    EXPECT_TRUE(hasWarning("not used until tickets (milestone M5)"));
+    EXPECT_EQ(report_.warnings.size(), 1u) << "only the empty-allowlist warning; ticket keys are live";
     load("[auth]\nissuer_pk.0 = " + std::string(43, 'A') + "\nissuer_pk.2 = short\n"
          "revocation_url = http://insecure/r.bin\n");
     EXPECT_TRUE(hasError("auth.issuer_pk.0: key id must be 1..255")) << allErrors();

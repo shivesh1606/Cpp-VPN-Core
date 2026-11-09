@@ -17,6 +17,9 @@
 #include "config/NodeConfig.h"
 #include "crypto/NodeIdentity.h"
 #include "protocol/v2/Server.h"
+#include "auth/RevocationFetcher.h"
+#include "auth/TicketAuthenticator.h"
+#include <sys/stat.h>
 #include <memory>
 #include <time.h>
 #include "version.h"
@@ -293,13 +296,120 @@ static uint64_t monotonicMs()
 
 // Builds the v2 responder from node.conf (design 02 section 7). Returns null when the node has
 // no identity (no config file): then only protocol v1 is served, as before M3.
-static std::unique_ptr<v2::Server> makeV2Server(const config::NodeConfig &cfg,
-                                                const crypto::NodeIdentity &id, v2::IpPool &pool)
+// Ticket mode (design 03): the verifier with the node's issuer keys and tag mask.
+static std::unique_ptr<auth::TicketAuthenticator> makeTicketAuthenticator(const config::NodeConfig &cfg)
+{
+    if (cfg.auth_mode != "ticket")
+        return nullptr;
+    auth::IssuerKeys keys;
+    for (const auto &kv : cfg.issuer_pk)
+    {
+        auth::PublicKey pk;
+        if (crypto::fromBase64Url(kv.second, pk.data(), pk.size())) // validated by NodeConfig
+            keys[uint8_t(kv.first)] = pk;
+    }
+    return std::make_unique<auth::TicketAuthenticator>(std::move(keys), cfg.node_mask);
+}
+
+// Revocation list sources (design 03 section 6): revocation_file is loaded at start and reloaded
+// whenever it changes (an operator or a sync job copies it in); revocation_url, if set, is polled
+// by a background thread and every new good list is saved to revocation_file.
+class RevocationSources
+{
+public:
+    RevocationSources(const config::NodeConfig &cfg, auth::TicketAuthenticator &authn)
+        : path_(cfg.revocation_file), authn_(authn)
+    {
+        if (!cfg.revocation_url.empty())
+        {
+            const std::string url = cfg.revocation_url;
+            fetcher_ = std::make_unique<auth::RevocationFetcher>(
+                [url](std::vector<uint8_t> &b, std::string &e) { return auth::curlFetch(url, b, e); },
+                std::chrono::seconds(cfg.revocation_poll_s));
+            LOG(LOG_INFO, "Revocations: polling %s every %d s", url.c_str(), cfg.revocation_poll_s);
+        }
+    }
+
+    // Called once a second on the packet-loop thread.
+    void poll(v2::Server *server, std::vector<v2::Server::Outgoing> &out)
+    {
+        std::vector<uint8_t> bytes;
+        if (fetcher_ && fetcher_->take(bytes) && apply(bytes, server, out, "download"))
+            save(bytes);
+        if (fetcher_ && fetcher_->lastError() != last_fetch_error_)
+        {
+            last_fetch_error_ = fetcher_->lastError();
+            if (!last_fetch_error_.empty())
+                LOG(LOG_WARN, "Revocations: download failed (%s); keeping the current list", last_fetch_error_.c_str());
+        }
+        struct stat st{};
+        if (stat(path_.c_str(), &st) != 0)
+        {
+            if (!warned_missing_)
+                LOG(LOG_WARN, "Revocations: no list at %s yet (nobody is revoked)", path_.c_str());
+            warned_missing_ = true;
+            return;
+        }
+        if (st.st_mtime == seen_mtime_ && st.st_size == seen_size_)
+            return;
+        seen_mtime_ = st.st_mtime;
+        seen_size_ = st.st_size;
+        std::string text, err;
+        if (config::readTextFile(path_, text, err))
+            apply(std::vector<uint8_t>(text.begin(), text.end()), server, out, "file");
+    }
+
+private:
+    bool apply(const std::vector<uint8_t> &bytes, v2::Server *server, std::vector<v2::Server::Outgoing> &out,
+               const char *source)
+    {
+        size_t dropped = 0;
+        const auth::ListVerdict v = authn_.applyRevocations(bytes, server, monotonicMs(), out, dropped);
+        if (v == auth::ListVerdict::kOk)
+            LOG(LOG_INFO, "Revocations: list seq %llu from %s applied (%zu revoked ids), %zu client(s) dropped",
+                (unsigned long long)authn_.revocations()->seq, source, authn_.revocations()->size(), dropped);
+        else if (v != auth::ListVerdict::kRollback) // same/older list: nothing new, stay quiet
+            LOG(LOG_WARN, "Revocations: list from %s rejected (%s); keeping the current list", source,
+                auth::listVerdictName(v));
+        return v == auth::ListVerdict::kOk;
+    }
+    void save(const std::vector<uint8_t> &bytes)
+    {
+        const std::string tmp = path_ + ".tmp";
+        FILE *f = std::fopen(tmp.c_str(), "wb");
+        if (!f || std::fwrite(bytes.data(), 1, bytes.size(), f) != bytes.size() || std::fclose(f) != 0 ||
+            std::rename(tmp.c_str(), path_.c_str()) != 0)
+        {
+            LOG(LOG_WARN, "Revocations: cannot save the downloaded list to %s", path_.c_str());
+            return;
+        }
+        struct stat st{};
+        if (stat(path_.c_str(), &st) == 0) // our own write: do not re-apply it as a "file" change
+        {
+            seen_mtime_ = st.st_mtime;
+            seen_size_ = st.st_size;
+        }
+    }
+
+    std::string path_;
+    auth::TicketAuthenticator &authn_;
+    std::unique_ptr<auth::RevocationFetcher> fetcher_;
+    std::string last_fetch_error_;
+    time_t seen_mtime_ = 0;
+    off_t seen_size_ = -1;
+    bool warned_missing_ = false;
+};
+
+static std::unique_ptr<v2::Server> makeV2Server(const config::NodeConfig &cfg, const crypto::NodeIdentity &id,
+                                                v2::IpPool &pool, auth::TicketAuthenticator *tickets)
 {
     if (!id.loaded())
         return nullptr;
     v2::ServerConfig sc;
-    sc.auth = cfg.auth_mode == "open" ? v2::ServerConfig::kOpen : v2::ServerConfig::kAllowlist;
+    sc.auth = cfg.auth_mode == "open"     ? v2::ServerConfig::kOpen
+              : cfg.auth_mode == "ticket" ? v2::ServerConfig::kTicket
+                                          : v2::ServerConfig::kAllowlist;
+    sc.authenticator = tickets;
     sc.allowed.insert(cfg.allowed_keys.begin(), cfg.allowed_keys.end());
     auto idOf = [](const std::string &name) -> int {
         for (const auto &b : crypto::CipherRegistry::instance().all())
@@ -333,8 +443,17 @@ static std::unique_ptr<v2::Server> makeV2Server(const config::NodeConfig &cfg,
         }
     }
 #endif
-    LOG(LOG_INFO, "Protocol v2 enabled: auth=%s (%zu allowed clients), v1 %s",
-        cfg.auth_mode.c_str(), cfg.allowed_keys.size(), cfg.accept_v1 ? "also accepted" : "disabled");
+    if (cfg.auth_mode == "ticket")
+        LOG(LOG_INFO, "Protocol v2 enabled: auth=ticket (%zu issuer key(s), node tags %s), v1 %s",
+            cfg.issuer_pk.size(), [&] {
+                std::string t;
+                for (const auto &n : cfg.tags)
+                    t += (t.empty() ? "" : ",") + n;
+                return t;
+            }().c_str(), cfg.accept_v1 ? "also accepted" : "disabled");
+    else
+        LOG(LOG_INFO, "Protocol v2 enabled: auth=%s (%zu allowed clients), v1 %s",
+            cfg.auth_mode.c_str(), cfg.allowed_keys.size(), cfg.accept_v1 ? "also accepted" : "disabled");
     return server;
 }
 
@@ -345,12 +464,15 @@ static void logV2Stats(const v2::Server &s)
         "v2: active %zu pending %zu | hs resp %lu retx %lu confirm ack/data %lu/%lu rekeys %lu expired %lu | "
         "hs drop fmt %lu mac1 %lu decrypt %lu auth %lu replay %lu no_cipher %lu pool %lu | "
         "tr drop fmt %lu no_session %lu replay %lu auth %lu src_ip %lu ack %lu | roams %lu | "
-        "removed bye/reject/idle %lu/%lu/%lu",
+        "removed bye/reject/idle/revoked %lu/%lu/%lu/%lu | ticket drop format %lu unknown_key %lu sig %lu "
+        "expired %lu scope %lu device %lu revoked %lu",
         s.activeSessions(), s.pendingSessions(), v.hs_resp_sent, v.hs_retransmit, v.hs_confirm_ack,
         v.hs_confirm_data, v.rekeys, v.hs_expired, v.hs_drop_format, v.hs_drop_mac1, v.hs_drop_decrypt,
         v.hs_drop_auth, v.hs_drop_replay, v.hs_drop_no_cipher, v.hs_drop_pool_empty, v.tr_drop_format,
         v.tr_drop_no_session, v.tr_drop_replay, v.tr_drop_auth, v.tr_drop_src_ip, v.tr_drop_ack, v.roams,
-        v.removed_bye, v.removed_reject, v.removed_idle);
+        v.removed_bye, v.removed_reject, v.removed_idle, v.removed_revoked, v.hs_drop_ticket[1],
+        v.hs_drop_ticket[2], v.hs_drop_ticket[3], v.hs_drop_ticket[4], v.hs_drop_ticket[5], v.hs_drop_ticket[6],
+        v.hs_drop_ticket[7]);
 }
 
 // --gen-key / --pubkey / --check-config / --help / --version. Returns the exit code, or -1 to
@@ -510,7 +632,15 @@ int main(int argc, char **argv)
         LOG(LOG_INFO, "Cipher backend: id %u %s/%s%s", b->algorithmId(), b->algorithmName(),
             b->implName(), b->insecure() ? " (INSECURE, protocol v1 only)" : "");
     ClientManagerPool v2_pool(cm);
-    std::unique_ptr<v2::Server> v2srv = makeV2Server(cfg, node_identity, v2_pool);
+    std::unique_ptr<auth::TicketAuthenticator> ticket_auth = makeTicketAuthenticator(cfg);
+    std::unique_ptr<v2::Server> v2srv = makeV2Server(cfg, node_identity, v2_pool, ticket_auth.get());
+    std::unique_ptr<RevocationSources> revocations;
+    if (ticket_auth && v2srv)
+    {
+        revocations = std::make_unique<RevocationSources>(cfg, *ticket_auth);
+        std::vector<v2::Server::Outgoing> none;
+        revocations->poll(v2srv.get(), none); // last good list before the first handshake
+    }
     if (!cfg.accept_v1 && !v2srv)
     {
         LOG(LOG_ERROR, "node.accept_v1 = false needs protocol v2 (a node key)");
@@ -591,6 +721,8 @@ int main(int argc, char **argv)
             {
                 v2_out.clear();
                 v2srv->tick(monotonicMs(), v2_out);
+                if (revocations)
+                    revocations->poll(v2srv.get(), v2_out); // design 03 section 2.2: drop revoked now
                 for (const auto &o : v2_out)
                 {
                     sockaddr_in to{};

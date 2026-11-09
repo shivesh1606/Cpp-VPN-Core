@@ -15,6 +15,7 @@ Topics raised but deliberately deferred, because they don't block the [implement
 | P9 | Engine scaling: `epoll`, `SO_REUSEPORT` multi-threading, `io_uring`, live config reload | When one core saturates on a node (experiment 002/003) | README performance goals |
 | P10 | Logging, privacy and abuse policy | Before any non-friend users | Design 03 (`user_id` mapping) |
 | P11 | Android sign-in API migration (`GoogleSignIn` → Credential Manager) | With P2 | Android `ProfileFragment.kt` |
+| P12 | `vpnctl` issuer-key rotation command and multi-admin use | Before the first planned key rotation, or a second person issues tickets | Design 03 §4, §9 |
 
 ## P1 — Multi-node deployment
 

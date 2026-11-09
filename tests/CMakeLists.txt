@@ -29,6 +29,12 @@ add_executable(unit_tests
     protocol/test_noise.cpp
     protocol/test_v2_wire.cpp
     protocol/test_v2_engine.cpp
+    protocol/test_v2_tickets.cpp
+    auth/test_ticket.cpp
+    auth/test_revocation.cpp
+    auth/test_tags_bundle.cpp
+    auth/test_issuer_key.cpp
+    auth/test_fetcher.cpp
 )
 target_link_libraries(unit_tests PRIVATE vpn_core GTest::gtest_main)
 target_compile_definitions(unit_tests PRIVATE CPPVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

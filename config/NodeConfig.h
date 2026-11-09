@@ -4,11 +4,10 @@
 // The built-in defaults are exactly the constants the server used before M3, so running
 // without a config file behaves as before.
 //
-// Unknown sections or keys are errors (typos must not be silently ignored). Keys that only
-// take effect with tickets (M5) are validated now and produce a warning that they are not
-// active yet. auth.mode "ticket" is rejected until M5 and "open" unless the
-// binary is built with -DALLOW_OPEN_AUTH=ON, so a config can never claim protection the binary
-// does not provide, nor silently run without client authentication.
+// Unknown sections or keys are errors (typos must not be silently ignored). auth.mode "open"
+// is refused unless the binary is built with -DALLOW_OPEN_AUTH=ON, so a node never runs without
+// client authentication by accident. auth.mode "ticket" is checked for usability at load time
+// (issuer key present, node tags defined in tags.conf).
 #ifndef CONFIG_NODECONFIG_H
 #define CONFIG_NODECONFIG_H
 
@@ -25,6 +24,8 @@ namespace config
 constexpr const char *kDefaultConfigPath = "/etc/cppvpn/node.conf";
 constexpr const char *kDefaultNodeKeyPath = "/etc/cppvpn/node.key";
 constexpr const char *kDefaultAllowedClientsPath = "/etc/cppvpn/allowed_clients";
+constexpr const char *kDefaultTagsPath = "/etc/cppvpn/tags.conf";
+constexpr const char *kDefaultRevocationPath = "/etc/cppvpn/revocations.bin";
 
 struct NodeConfig
 {
@@ -34,7 +35,8 @@ struct NodeConfig
 
     // [node]
     std::string id;
-    std::vector<std::string> tags; // design 03 section 3 (used from M5)
+    std::vector<std::string> tags; // design 03 section 3: names from tags.conf (ticket scope)
+    uint32_t node_mask = 0;        // computed from tags + tags.conf (ticket mode)
     uint16_t port = 5555;
     std::string node_key; // empty = no node identity (allowed only without a config file)
     bool accept_v1 = true; // protocol v1 (XOR, unauthenticated) for not-yet-updated clients
@@ -58,8 +60,12 @@ struct NodeConfig
     std::string allowed_clients;          // file of client public keys (allowlist mode)
     std::vector<std::string> allowed_keys; // loaded from allowed_clients: 32-byte keys
     std::map<std::string, std::string> allowed_names; // key -> name from the file (logging)
-    std::map<int, std::string> issuer_pk; // key_id -> base64url Ed25519 public key
-    std::string revocation_url;
+    std::map<int, std::string> issuer_pk; // key_id -> base64url Ed25519 public key (ticket mode)
+    std::string tags_file;                // tags.conf shared with vpnctl
+    std::string revocation_file;          // signed list: loaded at start, reloaded on change,
+                                          // and where a downloaded list is saved
+    std::string revocation_url;           // optional https:// source polled every revocation_poll_s
+    int revocation_poll_s = 300;
 
     // [timers] (design 02 section 7)
     int pending_expiry_s = 10; // pending handshake expiry (v1 and v2)
@@ -89,6 +95,9 @@ void applyIni(const IniFile &ini, NodeConfig &cfg, ConfigReport &report);
 // paths, and in allowlist mode the allowed_clients file is loaded and validated.
 NodeConfig loadNodeConfig(const std::string &path, const std::vector<std::string> &overrides,
                           ConfigReport &report);
+
+// Ticket mode: reads tags_file and computes cfg.node_mask from cfg.tags.
+bool loadNodeTags(NodeConfig &cfg, ConfigReport &report);
 
 // Reads an allowed_clients file: one "<base64url public key> [name]" per line, '#' comments.
 bool loadAllowedClients(const std::string &path, NodeConfig &cfg, ConfigReport &report);

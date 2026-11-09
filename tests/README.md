@@ -24,11 +24,17 @@ The engine is built as the static library `vpn_core`. Both `vpn_server` and `uni
 | [protocol/test_noise.cpp](protocol/test_noise.cpp) | Noise IK byte-identical to the cacophony and snow vectors ([vectors/](protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt)): handshake, handshake hash, transport. HMAC/HKDF-BLAKE2b against Python. Tampering, low-order ephemeral, wrong prologue/key. |
 | [protocol/test_v2_wire.cpp](protocol/test_v2_wire.cpp) | v2 sizes (97 B HS_RESP …), byte order, TAI64N ordering, mac1 coverage, strict payload parsing; replay window incl. a 200 000-step reference-model check |
 | [protocol/test_v2_engine.cpp](protocol/test_v2_engine.cpp) | `v2::Client` ↔ `v2::Server` in process: handshake + data both ways; **each rejected HS_INIT moves exactly one drop counter and allocates no IP** (design 02 §10.3); retransmit cache; lost ACK → DATA confirms; pending expiry; replay/tamper; inner source check; roaming after auth only; rekey keeps IP + old key decrypts; BYE; keepalive/idle; open mode; cipher preference; keylog |
+| [auth/test_ticket.cpp](auth/test_ticket.cpp) | Ticket body pinned byte for byte to design 03 §2; signature over context ‖ body; every §2.1 reason incl. the ±60 s skew; check order; key rotation by `key_id` |
+| [auth/test_revocation.cpp](auth/test_revocation.cpp) | Revocation list layout, deterministic encoding, tampering / wrong key / bad count; `RevocationState` refuses equal or older `seq` and keeps the last good list |
+| [auth/test_tags_bundle.cpp](auth/test_tags_bundle.cpp) | `tags.conf` parsing and errors; bundle URI round trip and size (224 B / 318 chars), several nodes with DNS names, malformed input |
+| [auth/test_issuer_key.cpp](auth/test_issuer_key.cpp) | Issuer key file: 0600, no plaintext key bytes, wrong passphrase, header/salt/box tampering, never overwritten |
+| [auth/test_fetcher.cpp](auth/test_fetcher.cpp) | Background fetch: first fetch at once, unchanged bytes not redelivered, errors kept, prompt shutdown; `curlFetch` https-only (and `file://` in tests) |
+| [protocol/test_v2_tickets.cpp](protocol/test_v2_tickets.cpp) | `auth.mode = ticket` in process: valid ticket connects; each failure reason moves exactly one counter and allocates no IP; revocation drops the session with BYE and frees the IP; rollback ignored; expired ticket fails at rekey |
 | [net/test_cidr.cpp](net/test_cidr.cpp) | `tun_cidr` parsing, netmask, broadcast, pool = server+1 … broadcast−1, prefix limits |
 | [net/test_ipv4.cpp](net/test_ipv4.cpp) | `ipv4Destination` (plan H1): short packets, non-IPv4, null |
 | [sessions/test_client_manager.cpp](sessions/test_client_manager.cpp) | IP pool, `addClient` with locks, lookups, roaming, BYE removal, sweep. `DISABLED_` test documents defect H3 (enable in M4). |
 | [e2e/v1_roundtrip.py](e2e/v1_roundtrip.py) | Real v1 handshake, plus ICMP echo through the tunnel (UDP→TUN and TUN→UDP), plus BYE |
-| [e2e/run_docker_e2e.sh](e2e/run_docker_e2e.sh) | Docker: (A) no config, v1 only; (B) `node.conf` + key: v1 **and** v2 (ping, rekey, lost ACK, AES-GCM) with the server configuring `tun0`; (C) no key → refuses to start; (D) client not in `allowed_clients` → no session; (E) `accept_v1 = false` → v1 refused, v2 works |
+| [e2e/run_docker_e2e.sh](e2e/run_docker_e2e.sh) | Docker: (A) no config, v1 only; (B) `node.conf` + key: v1 **and** v2 (ping, rekey, lost ACK, AES-GCM) with the server configuring `tun0`; (C) no key → refuses to start; (D) client not in `allowed_clients` → no session; (E) `accept_v1 = false` → v1 refused, v2 works; (F) tickets: `vpnctl` bundle connects and rekeys, out-of-scope / missing ticket refused, revoking a connected user drops it (BYE) and reconnects are refused |
 
 ## Run
 

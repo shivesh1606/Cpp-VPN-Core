@@ -59,6 +59,13 @@ add_library(vpn_core STATIC
     protocol/v2/Server.cpp
     protocol/v2/Client.cpp
 
+    auth/Ticket.cpp
+    auth/RevocationList.cpp
+    auth/TagRegistry.cpp
+    auth/Bundle.cpp
+    auth/IssuerKey.cpp
+    auth/RevocationFetcher.cpp
+
     utils/counter_definition.cpp
     utils/logger.cpp
 )
@@ -129,6 +136,10 @@ target_compile_definitions(crypto_bench PRIVATE
 # ---------------- Protocol v2 test client (Linux; the Windows client is clients/windows) ----------------
 add_executable(vpn_client_v2 tools/vpn_client_v2.cpp)
 target_link_libraries(vpn_client_v2 PRIVATE vpn_core)
+
+# ---------------- vpnctl: Phase 0 ticket issuer (design doc 03 section 5) ----------------
+add_executable(vpnctl tools/vpnctl.cpp)
+target_link_libraries(vpnctl PRIVATE vpn_core)
 
 # ---------------- Unit tests (GoogleTest, run with ctest) ----------------
 include(CTest)   # defines BUILD_TESTING (default ON)

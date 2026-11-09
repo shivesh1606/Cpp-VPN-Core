@@ -53,9 +53,18 @@ build\windows-client\vpn_client.exe --protocol v2 --server-pub <S_pub> --key cli
 build\windows-client\vpn_client.exe --protocol v2 --server-pub <S_pub> --key client.key 35.x.x.x 5555   # tunnel (admin)
 ```
 
+With a ticket bundle from `vpnctl issue` (design 03), the bundle replaces all of the above: it sets the server, port, node key, device key and ticket. `--node ID` picks a node when the bundle lists several. Bundle hosts may be DNS names.
+
+```powershell
+build\windows-client\vpn_client.exe --bundle alice.txt --probe      # or: --bundle "cppvpn://import?b=..."
+build\windows-client\vpn_client.exe --bundle alice.txt              # tunnel (admin)
+```
+
+The bundle contains the device private key: keep the file private.
+
 A v2 probe prints `v2 established: hsid=… ip=… cipher=…` and ends with `PROBE OK (v2)`. The server logs the same `hsid`. `--rekey-after 8 --duration 25` makes rekeys visible in a probe.
 
-Options: `--probe`, `--duration SEC`, `--route-all`, `--log-level error|warn|info|debug`, `--config FILE`, `--protocol v1|v2`, `--server-pub B64`, `--key FILE`, `--gen-key FILE`, `--pubkey FILE`, `--rekey-after SEC`, `-h`.
+Options: `--probe`, `--duration SEC`, `--route-all`, `--log-level error|warn|info|debug`, `--config FILE`, `--protocol v1|v2`, `--server-pub B64`, `--key FILE`, `--gen-key FILE`, `--pubkey FILE`, `--rekey-after SEC`, `--bundle FILE|URI`, `--node ID`, `-h`.
 
 A successful probe ends with `PROBE OK`; exit codes are 0 = ok, 2 = no WELCOME. The server log should then show `Handshake: Client … Session ID N`, followed by `[BYE] Removing client session N`.
 

@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Status** | Accepted (2026-11-08) |
+| **Status** | Accepted (2026-11-08). **Phase 0 implemented in M5** (node verification, revocation, `vpnctl`, bundles, Linux and Windows clients); see §9. Phase 1 (§7) is parked (P2). |
 | **Scope** | Authorization of clients to nodes: ticket format, issuance (Phase 0 CLI, Phase 1 serverless), verification, revocation, issuer key lifecycle, Phase 0 bundle |
 | **Used by** | [02 — Handshake](02-handshake.md) §5 step 5 (`auth_mode = ticket`) |
-| **Replaces** | The interim v2 allowlist (`auth.mode = allowlist`, M4: a static list of client keys per node). Protocol v1 still accepts any client that reaches UDP 5555 ([main.cpp:124-205](../../main.cpp#L124-L205)) |
+| **Replaces** | The interim v2 allowlist (`auth.mode = allowlist`, M4: a static list of client keys per node). Protocol v1 still accepts any client that reaches UDP 5555 ([main.cpp:127-208](../../main.cpp#L127-L208)) |
 
 ## Decisions
 
@@ -155,14 +155,59 @@ Ticket format and node verification are identical to Phase 0. Only the issuer ch
 
 ## 8. Code impact
 
-| New | Purpose |
-|---|---|
-| `auth/Ticket.{h,cpp}` | Encode/decode/verify (shared by node and `vpnctl`) |
-| `auth/RevocationList.{h,cpp}` | Parse, verify, monotonic `seq`, lookup set |
-| `auth/RevocationFetcher` | Periodic HTTPS GET, run off the packet loop (separate thread or forked helper; must not block `select()`) |
-| `tools/vpnctl/` | CLI target (§5) |
-| `node.conf` | `issuer_pk.<key_id>`, `tags`, `revocation_url`, `auth_mode = ticket` |
-| Android | QR import (`cppvpn://` deep link), Keystore-wrapped `device_sk`, ticket in `HS_INIT` payload |
+| New | Purpose | Status (M5) |
+|---|---|---|
+| `auth/Ticket.{h,cpp}` | Encode/decode/verify (shared by node and `vpnctl`) | Done: [auth/Ticket.h](../../auth/Ticket.h) |
+| `auth/RevocationList.{h,cpp}` | Parse, verify, monotonic `seq`, lookup set | Done: [auth/RevocationList.h](../../auth/RevocationList.h) |
+| `auth/RevocationFetcher` | Periodic HTTPS GET, run off the packet loop (separate thread or forked helper; must not block `select()`) | Done: thread + `curl` (no shell), [auth/RevocationFetcher.h](../../auth/RevocationFetcher.h) |
+| `tools/vpnctl/` | CLI target (§5) | Done: [tools/vpnctl.cpp](../../tools/vpnctl.cpp) |
+| `node.conf` | `issuer_pk.<key_id>`, `tags`, `revocation_url`, `auth_mode = ticket` | Done, plus `tags_file`, `revocation_file`, `revocation_poll_s` ([deploy/node.conf.example](../../deploy/node.conf.example)) |
+| Android | QR import (`cppvpn://` deep link), Keystore-wrapped `device_sk`, ticket in `HS_INIT` payload | M6 |
+
+## 9. As implemented (M5)
+
+```
+ laptop (WSL / Linux)                                   node                                 client
+ vpnctl init ─▶ issuer.key (Argon2id+secretbox, 0600)   node.conf [auth] mode = ticket
+            ─▶ issuer.pub ──────── issuer_pk.1 = … ──▶  issuer_pk.1, tags = friends
+            ─▶ tags.conf ───────── copy ─────────────▶  tags_file
+ vpnctl node add (host, port, S_pub, tags)
+ vpnctl issue --user alice --tags friends ─▶ bundle (cppvpn://import?b=…, secret) ──────────▶ --bundle
+                                                        HS_INIT payload1.ticket ◀─────────── ticket
+                                                        §2.1 checks → HS_DROP_AUTH_<reason>
+ vpnctl revoke --user alice ─▶ revocations.bin ──copy─▶ revocation_file (reload ≤ 1 s)
+                                      └─ git push ────▶ revocation_url (poll, curl thread)
+                                                        → drop matching sessions + BYE ─────▶ "Server sent BYE"
+```
+
+| Part | Where | Notes |
+|---|---|---|
+| Ticket | [auth/Ticket.h](../../auth/Ticket.h) | Layout pinned by a byte-level test (`Ticket.BodyLayoutMatchesTheDesign`); `verify()` runs the §2.1 checks in order and returns one `Verdict` |
+| Node hook | [protocol/v2/Server.h](../../protocol/v2/Server.h) `Authenticator`, [auth/TicketAuthenticator.h](../../auth/TicketAuthenticator.h) | Design 02 §5 step 5; the reasons are counted in `hs_drop_ticket[]` and logged by name (`reason=revoked`) |
+| Revocation | [auth/RevocationList.h](../../auth/RevocationList.h), [auth/RevocationFetcher.h](../../auth/RevocationFetcher.h) | Applied on the packet-loop thread; the download runs on a background thread |
+| Issuer | [tools/vpnctl.cpp](../../tools/vpnctl.cpp), [auth/IssuerKey.h](../../auth/IssuerKey.h), [auth/Bundle.h](../../auth/Bundle.h), [auth/TagRegistry.h](../../auth/TagRegistry.h) | `init`, `node add/list/remove`, `issue`, `revoke`, `users`, `inspect` |
+
+Details the design left open, as built:
+
+- **Ticket on every handshake:** the ticket is checked on every handshake, rekeys included. An expired ticket therefore can't renew, and the session ends at reject-after (180 s), as §2.2 says.
+- **Revocation drops immediately:**
+  - A new list ends matching sessions at once, and the server sends `BYE` so the client knows.
+  - Matching covers all of a client's sessions (current, pending and previous); the last one frees its IP.
+- **Two revocation sources:**
+  - `revocation_file` is the last good list. It's loaded before the first handshake and reloaded within 1 s when its size or mtime changes. Copying the file with `scp` works without any hosting.
+  - `revocation_url`, if set, is downloaded every `revocation_poll_s` (default 300 s) with the system `curl`: https only, 20 s and 2 MB limits, no shell. Every newer good list is saved to `revocation_file`.
+  - Any bad, foreign or older list is ignored (`seq` must grow).
+- **Bundle encoding:** `node_id` and `host` are length-prefixed (u8). A one-node bundle is 224 B, which encodes to 318 characters as a `cppvpn://` URI (§5 estimated ~230 B / ~310). `host` may be a DNS name; the clients resolve it.
+- **`vpnctl` storage:**
+  - Users and revocations live in INI files (`users.ini`, `revoked.ini`) instead of `users.json`, so `vpnctl` needs no JSON library.
+  - The data directory is `0700`; the issuer key and bundles are `0600`.
+  - `vpnctl` is Linux-only: run it in WSL on Windows.
+- **Issuer key file:** 149 B.
+  - `crypto_pwhash` (Argon2id; `--kdf moderate` by default, 256 MiB) derives the key, and `crypto_secretbox` encrypts the Ed25519 secret key with it.
+  - The `key_id` is inside the box too, so a header edit can't relabel the key.
+  - `vpnctl` never overwrites an existing issuer key.
+- **QR codes:** `vpnctl` prints the `qrencode -t ansiutf8 < bundle.txt` command rather than drawing QR codes itself. The Android QR scan import comes in M6.
+- **Key rotation (§4):** nodes support several `issuer_pk.N` at once. A `vpnctl` command for rotating to a new `key_id` is not built yet ([parked P12](../plan/parked-discussions.md)).
 
 ## References
 

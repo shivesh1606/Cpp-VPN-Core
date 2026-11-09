@@ -6,9 +6,13 @@
 //   vpn_client_v2 --gen-key client.key            # prints the public key for allowed_clients
 //   vpn_client_v2 --key client.key --server-pub <S_pub> [--host 127.0.0.1] [--port 5555]
 //                 [--ping 10.8.0.1] [--count 3] [--rekey] [--drop-ack] [--offer chacha20poly1305,...]
+//   vpn_client_v2 --bundle FILE|cppvpn://... [--node ID] [--ping ...]   # from vpnctl issue (design 03)
+//                 [--hold SEC]   stay connected, one echo per second; exit 3 if the server ends it
 //
-// Exit code 0 = every echo got its reply (after the rekey too, with --rekey).
+// Exit codes: 0 = every echo got its reply (after the rekey too, with --rekey); 1 = handshake or
+// echo failure; 3 = the server ended the session (BYE, e.g. after a revocation).
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -22,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "auth/Bundle.h"
 #include "config/Ini.h"
 #include "crypto/CipherRegistry.h"
 #include "crypto/NodeIdentity.h"
@@ -92,7 +97,8 @@ int usage()
     std::fprintf(stderr,
                  "usage: vpn_client_v2 --gen-key FILE | --pubkey FILE\n"
                  "       vpn_client_v2 --key FILE --server-pub B64 [--host H] [--port P] [--ping IP]\n"
-                 "                     [--count N] [--rekey] [--drop-ack] [--offer a,b]\n");
+                 "                     [--count N] [--rekey] [--drop-ack] [--offer a,b] [--hold SEC]\n"
+                 "       vpn_client_v2 --bundle FILE|URI [--node ID] [--ping IP] [--count N] [--hold SEC]\n");
     return 2;
 }
 
@@ -154,10 +160,10 @@ public:
     }
 
     // Sends `count` echo requests to `dst`; returns how many replies matched.
-    int ping(uint32_t dst, int count)
+    int ping(uint32_t dst, int count, int first_seq = 1)
     {
         int ok = 0;
-        for (int seq = 1; seq <= count; seq++)
+        for (int seq = first_seq; seq < first_seq + count && !ended; seq++)
         {
             const uint16_t id = uint16_t(randombytes_random());
             const auto req = icmpEcho(c_.tunIp(), dst, id, uint16_t(seq));
@@ -167,7 +173,14 @@ public:
             bool got = false;
             while (!got && nowMs() < t0 + 3000)
             {
-                if (pump(int(t0 + 3000 - nowMs())) != v2::Client::Event::kData || plain_len < 28)
+                const auto ev = pump(int(t0 + 3000 - nowMs()));
+                if (ev == v2::Client::Event::kBye)
+                {
+                    std::printf("session ended by the server (BYE)\n");
+                    ended = true;
+                    break;
+                }
+                if (ev != v2::Client::Event::kData || plain_len < 28)
                     continue;
                 const uint32_t src = uint32_t(plain[12]) << 24 | uint32_t(plain[13]) << 16 |
                                      uint32_t(plain[14]) << 8 | plain[15];
@@ -185,7 +198,7 @@ public:
                     ok++;
                 }
             }
-            if (!got)
+            if (!got && !ended)
                 std::printf("FAIL: no echo reply for seq=%d\n", seq);
         }
         return ok;
@@ -194,6 +207,7 @@ public:
     uint8_t plain[2048];
     size_t plain_len = 0;
     int keepalives = 0;
+    bool ended = false; // the server sent BYE
 
 private:
     int sock_;
@@ -206,7 +220,8 @@ private:
 int main(int argc, char **argv)
 {
     std::string key_path, server_pub, host = "127.0.0.1", ping_ip, offer = "chacha20poly1305,aes256gcm";
-    int port = 5555, count = 3;
+    std::string bundle_arg, node_id;
+    int port = 5555, count = 3, hold = 0;
     bool rekey = false, drop_ack = false;
     for (int i = 1; i < argc; i++)
     {
@@ -233,27 +248,64 @@ int main(int argc, char **argv)
         else if (a == "--ping" && v) ping_ip = argv[++i];
         else if (a == "--count" && v) count = std::atoi(argv[++i]);
         else if (a == "--offer" && v) offer = argv[++i];
+        else if (a == "--bundle" && v) bundle_arg = argv[++i];
+        else if (a == "--node" && v) node_id = argv[++i];
+        else if (a == "--hold" && v) hold = std::atoi(argv[++i]);
         else if (a == "--rekey") rekey = true;
         else if (a == "--drop-ack") drop_ack = true;
         else return usage();
     }
-    if (key_path.empty() || server_pub.empty())
-        return usage();
-
     crypto::NodeIdentity me;
     std::string err;
-    if (!crypto::loadNodeKey(key_path, me, err))
-    {
-        std::fprintf(stderr, "error: %s\n", err.c_str());
-        return 1;
-    }
     v2::ClientConfig cc;
-    std::memcpy(cc.static_priv, me.privateKey(), 32);
-    if (!crypto::fromBase64Url(server_pub, cc.server_pub, 32))
+    if (!bundle_arg.empty())
     {
-        std::fprintf(stderr, "error: --server-pub is not a 43-character base64url key\n");
-        return 2;
+        // Bundle from vpnctl: node address + S_pub, the device key and the ticket (design 03 section 5)
+        std::string text = bundle_arg;
+        if (bundle_arg.rfind(auth::kBundleUriPrefix, 0) != 0 && !config::readTextFile(bundle_arg, text, err))
+        {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 2;
+        }
+        auth::Bundle b;
+        if (!auth::bundleFromText(text, b, err))
+        {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 2;
+        }
+        const auth::BundleNode *n = &b.nodes[0];
+        for (const auto &x : b.nodes)
+            if (x.id == node_id)
+                n = &x;
+        if (!node_id.empty() && n->id != node_id)
+        {
+            std::fprintf(stderr, "error: node '%s' is not in the bundle\n", node_id.c_str());
+            return 2;
+        }
+        host = n->host;
+        port = n->port;
+        std::memcpy(cc.server_pub, n->pub, 32);
+        me.setPrivateKey(b.device_sk);
+        cc.ticket = b.ticket;
+        std::printf("bundle: node %s (%s:%d), %zu node(s) in bundle, ticket %zu B\n", n->id.c_str(), host.c_str(),
+                    port, b.nodes.size(), cc.ticket.size());
     }
+    else
+    {
+        if (key_path.empty() || server_pub.empty())
+            return usage();
+        if (!crypto::loadNodeKey(key_path, me, err))
+        {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        if (!crypto::fromBase64Url(server_pub, cc.server_pub, 32))
+        {
+            std::fprintf(stderr, "error: --server-pub is not a 43-character base64url key\n");
+            return 2;
+        }
+    }
+    std::memcpy(cc.static_priv, me.privateKey(), 32);
     cc.offer.clear();
     for (const auto &name : config::splitList(offer))
         for (const auto &b : crypto::CipherRegistry::instance().all())
@@ -266,7 +318,20 @@ int main(int argc, char **argv)
     sockaddr_in server{};
     server.sin_family = AF_INET;
     server.sin_port = htons(uint16_t(port));
-    if (sock < 0 || inet_pton(AF_INET, host.c_str(), &server.sin_addr) != 1)
+    if (inet_pton(AF_INET, host.c_str(), &server.sin_addr) != 1)
+    {
+        addrinfo hints{}, *res = nullptr; // bundles may carry DNS names
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res)
+        {
+            std::fprintf(stderr, "error: cannot resolve %s\n", host.c_str());
+            return 2;
+        }
+        server.sin_addr = reinterpret_cast<sockaddr_in *>(res->ai_addr)->sin_addr;
+        freeaddrinfo(res);
+    }
+    if (sock < 0)
         return usage();
     std::printf("client key %s -> %s:%d\n", me.publicKeyBase64Url().c_str(), host.c_str(), port);
 
@@ -301,6 +366,29 @@ int main(int argc, char **argv)
             got += s.ping(ntohl(dst.s_addr), count);
             expected += count;
         }
+    }
+    if (hold > 0 && dst.s_addr && !s.ended)
+    {
+        std::printf("holding the session for %d s (one echo per second)\n", hold);
+        const uint64_t until = nowMs() + uint64_t(hold) * 1000;
+        int seq = 1000;
+        while (nowMs() < until && !s.ended)
+        {
+            got += s.ping(ntohl(dst.s_addr), 1, seq++);
+            expected += 1;
+            const uint64_t next = nowMs() + 1000;
+            while (nowMs() < next && !s.ended)
+                if (s.pump(int(next - nowMs())) == v2::Client::Event::kBye)
+                {
+                    std::printf("session ended by the server (BYE)\n");
+                    s.ended = true;
+                }
+        }
+    }
+    if (s.ended)
+    {
+        std::printf("ENDED: the server closed the session after %d/%d echo replies\n", got, expected);
+        return 3;
     }
     uint8_t bye[64];
     s.send(bye, client.sealBye(nowMs(), bye));

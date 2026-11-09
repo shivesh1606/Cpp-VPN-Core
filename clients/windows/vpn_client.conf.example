@@ -15,6 +15,9 @@ client_key=client.key
 offer=chacha20poly1305,aes256gcm
 # v2: start a new handshake after this many seconds (design 02 section 7)
 rekey_after=120
+# v2 with a ticket bundle from vpnctl (design 03): replaces server/port/server_pub/client_key
+# bundle=alice.txt
+# node=in-1
 
 # error | warn | info | debug
 log_level=info

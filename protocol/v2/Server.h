@@ -40,6 +40,25 @@ public:
     virtual void release(uint32_t ip) = 0;
 };
 
+// Step 5 for auth mode kTicket (design 03): checks the ticket from HS_INIT payload1 against the
+// client static key s_c. reason 0 = accepted; 1..7 = design 03 section 2.1 failure reasons
+// (auth::Verdict), each counted separately in ServerStats::hs_drop_ticket.
+struct AuthResult
+{
+    uint8_t reason = 0;
+    const char *reason_name = ""; // for logs, e.g. "revoked"
+    uint8_t user_id[16] = {0};
+    uint64_t ticket_id = 0;
+    uint32_t exp = 0;
+};
+class Authenticator
+{
+public:
+    virtual ~Authenticator() = default;
+    virtual AuthResult authenticate(const uint8_t s_c[32], const std::vector<uint8_t> &ticket) = 0;
+};
+constexpr size_t kTicketReasons = 8;
+
 // UDP endpoint, network byte order (as in sockaddr_in).
 struct Endpoint
 {
@@ -55,9 +74,11 @@ struct ServerConfig
     {
         kOpen,      // any client key (development only; refused by config unless -DALLOW_OPEN_AUTH)
         kAllowlist, // s_c must be in `allowed`
+        kTicket,    // `authenticator` verifies the ticket (design 03), on every handshake incl. rekeys
     };
     Auth auth = kAllowlist;
     std::set<std::string> allowed;            // 32-byte client public keys
+    Authenticator *authenticator = nullptr;   // kTicket
     std::vector<uint8_t> algorithms{1, 2};    // server preference (cipher ids)
     std::map<uint8_t, std::string> impl;      // cipher id -> implementation name
     bool allow_insecure_xor = false;
@@ -69,14 +90,16 @@ struct ServerConfig
 struct ServerStats
 {
     // handshake (section 8 drop reasons; each failed HS_INIT increments exactly one)
-    uint64_t hs_drop_format = 0, hs_drop_mac1 = 0, hs_drop_decrypt = 0, hs_drop_auth = 0,
+    uint64_t hs_drop_format = 0, hs_drop_mac1 = 0, hs_drop_decrypt = 0,
+             hs_drop_auth = 0, // allowlist: s_c not allowed
              hs_drop_replay = 0, hs_drop_no_cipher = 0, hs_drop_pool_empty = 0;
+    uint64_t hs_drop_ticket[kTicketReasons] = {0}; // ticket mode, indexed by AuthResult::reason
     uint64_t hs_resp_sent = 0, hs_retransmit = 0, hs_confirm_ack = 0, hs_confirm_data = 0,
              hs_expired = 0, hs_replaced = 0, rekeys = 0;
     // transport
     uint64_t tr_drop_format = 0, tr_drop_no_session = 0, tr_drop_replay = 0, tr_drop_auth = 0,
              tr_drop_src_ip = 0, tr_drop_ack = 0, roams = 0;
-    uint64_t removed_bye = 0, removed_reject = 0, removed_idle = 0;
+    uint64_t removed_bye = 0, removed_reject = 0, removed_idle = 0, removed_revoked = 0;
 };
 
 class Server
@@ -108,6 +131,11 @@ public:
     bool ownsTunIp(uint32_t ip) const { return by_tun_.count(ip) != 0; }
 
     void tick(uint64_t now_ms, std::vector<Outgoing> &out);
+
+    // Ends every session (all of the client's keys) whose ticket matches `revoked` (design 03
+    // section 2.2), sending BYE on active ones. Returns the number of clients dropped.
+    size_t revoke(const std::function<bool(const uint8_t user_id[16], uint64_t ticket_id)> &revoked,
+                  uint64_t now_ms, std::vector<Outgoing> &out);
 
     const ServerStats &stats() const { return stats_; }
     size_t activeSessions() const;

@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtest-dev \
     libsodium-dev \
     libssl-dev \
+    ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+# curl: nodes download the revocation list with it (design 03 section 6; auth.revocation_url)
 
 WORKDIR /src
 COPY . .

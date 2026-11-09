@@ -29,7 +29,7 @@ Not WireGuard wire-compatible (different hash, no PSK, different header). That's
 | G4 | Client identity hiding | `s_c` encrypted under the `es`-derived key; ticket inside the encrypted payload |
 | G5 | 1-RTT to the first data packet | msg1/msg2; ACK sent together with the first data |
 | G6 | Replay resistance | TAI64N timestamp, strictly increasing per `s_c` |
-| G7 | No state or IP allocation before authentication | Processing order in §5 (fixes the pool-exhaustion bug at [main.cpp:162](../../main.cpp#L162)) |
+| G7 | No state or IP allocation before authentication | Processing order in §5 (fixes the pool-exhaustion bug at [main.cpp:165](../../main.cpp#L165)) |
 | G8 | Idempotent retransmission (keeps the PR #2 / `fa857d9` behaviour) | msg2 cache keyed by `hash(msg1)` |
 | G9 | No reflection amplification | msg2 (97 B) < msg1 (≈290 B) |
 | G10 | Unauthenticated scanners get no response | `mac1` keyed by `S_pub` |
@@ -176,10 +176,10 @@ recv HS_INIT
 | Parameter | Value | Reference / current |
 |---|---|---|
 | Handshake retry | 5 s + jitter (0–333 ms), new msg1 each attempt | WireGuard `REKEY_TIMEOUT`; app today: 4 attempts |
-| Pending expiry | 10 s | today `[timers] pending_expiry_s` ([deploy/node.conf.example](../../deploy/node.conf.example), used at [main.cpp:527](../../main.cpp#L527)) |
+| Pending expiry | 10 s | today `[timers] pending_expiry_s` ([deploy/node.conf.example](../../deploy/node.conf.example), used at [main.cpp:657](../../main.cpp#L657)) |
 | Keepalive | 15 s (sent in msg2 `keepalive_s`) | today 15 s (`KEEPALIVE_INTERVAL_MS`, app) |
 | Rekey after | 120 s (client-initiated) | WireGuard `REKEY_AFTER_TIME`; doc 01 C4 |
-| Reject after | 180 s | WireGuard `REJECT_AFTER_TIME`; replaces the v1 idle sweep `[timers] dead_after_s` = 60 s ([main.cpp:528](../../main.cpp#L528)) |
+| Reject after | 180 s | WireGuard `REJECT_AFTER_TIME`; replaces the v1 idle sweep `[timers] dead_after_s` = 60 s ([main.cpp:658](../../main.cpp#L658)) |
 
 `auth_mode` in `node.conf` lets the handshake ship before tickets:
 
@@ -206,8 +206,8 @@ Status after M4 in the last column. v1 code stays until M7 (Android moves to v2 
 | [protocol/Handshake.h](../../protocol/Handshake.h) structs | v2 layouts (§3); v1 kept behind a demux on `ver` during migration | Done: [protocol/v2/Wire.h](../../protocol/v2/Wire.h); demux on the first byte in `main.cpp` |
 | [sessions/session/ClientSession.*](../../sessions/session/ClientSession.h) (keyed by address + `client_magic`) | `HandshakeTable`: PENDING sessions by `sender_idx` and `s_c`, plus the msg2 cache | Done inside [protocol/v2/Server.h](../../protocol/v2/Server.h) (sessions by index, peers by `s_c`, msg2 cache); `ClientSession` stays for v1 |
 | [sessions/client/Client_Manager.*](../../sessions/client/Client_Manager.h) | Indexes `receiver_idx` / `s_c` / `tun_ip`; `generateSessionId()` (sequential) replaced by random unique `u32` | Done in `v2::Server` (random indexes); `ClientManager` now only owns the shared IP pool and v1 clients |
-| `handleHandshake` HELLO/ACK branches ([main.cpp:124-242](../../main.cpp#L124-L242)) | §5 pipeline; ACK handling per D3 | Done: `Server::onInit`, `Server::onTransport` |
-| `handleUdpToTun` lookup ([main.cpp:58-77](../../main.cpp#L58-L77)) | Lookup by `receiver_idx`, then `open()`, then endpoint update | Done (v2); the v1 lookup is unchanged |
+| `handleHandshake` HELLO/ACK branches ([main.cpp:127-245](../../main.cpp#L127-L245)) | §5 pipeline; ACK handling per D3 | Done: `Server::onInit`, `Server::onTransport` |
+| `handleUdpToTun` lookup ([main.cpp:61-80](../../main.cpp#L61-L80)) | Lookup by `receiver_idx`, then `open()`, then endpoint update | Done (v2); the v1 lookup is unchanged |
 | Android app (separate repo `NetSpeedv3`): `MyVpnService.performHandshake()` in `MyVpnService.kt` | Kotlin initiator on Lazysodium; same test vectors | M6. The vector file is [tests/protocol/vectors/](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt) |
 
 ## 10. Verification

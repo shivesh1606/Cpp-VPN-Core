@@ -19,7 +19,8 @@ node_key  = /etc/cppvpn/node.key       ; X25519 identity, mode 0600. Create it o
 accept_v1 = true                       ; also serve protocol v1 (XOR, NO authentication) for clients
                                        ; that are not updated yet (Android before M6). Set false
                                        ; once every client speaks v2.
-; tags    = friends, region-in         ; access tags for tickets (design 03 section 3) - from M5
+; tags    = friends, region-in         ; ticket mode: the scope this node serves. Names from
+                                       ; tags.conf; a ticket is accepted if it shares a tag.
 
 [tunnel]
 tun_name  = tun0                       ; TUN interface name (max 15 chars)
@@ -37,15 +38,24 @@ allow_insecure_xor    = false          ; true only for benchmarks; 'xor' in algo
 
 [auth]                                 ; design 02 section 7, design 03 - protocol v2 clients
 mode            = allowlist            ; allowlist: only keys in allowed_clients may connect.
-                                       ; ticket (M5) is rejected until implemented; open (any key)
-                                       ; only in builds with -DALLOW_OPEN_AUTH=ON (development).
+                                       ; ticket: clients present a ticket signed by vpnctl (design
+                                       ;   03); needs node.tags, issuer_pk.N and tags_file below.
+                                       ; open (any key): only in builds with -DALLOW_OPEN_AUTH=ON.
 allowed_clients = /etc/cppvpn/allowed_clients  ; one client public key per line, optional name:
                                        ;   <43-char public key>  my-laptop      # comment
                                        ; client key: vpn_client_v2 --gen-key FILE (Linux test
                                        ; client) or vpn_client.exe --gen-key FILE (Windows)
                                        ; (may be empty; restart the server after editing, N4)
-; issuer_pk.1     = <base64url Ed25519 public key> ; M5: ticket issuer key, by key_id 1..255
-; revocation_url  = https://raw.githubusercontent.com/<owner>/<repo>/main/revocations.bin  ; M5
+; --- ticket mode (vpnctl init prints the issuer_pk line; copy its tags.conf to tags_file) ---
+; issuer_pk.1       = <base64url Ed25519 public key>  ; issuer key by key_id 1..255; keep the old
+;                                                     ; one during a rotation (design 03 section 4)
+; tags_file         = /etc/cppvpn/tags.conf           ; tag names -> bits, same file as vpnctl's
+; revocation_file   = /etc/cppvpn/revocations.bin     ; signed list from vpnctl revoke: loaded at
+;                                                     ; start and reloaded within 1 s when it changes
+; revocation_url    = https://raw.githubusercontent.com/<owner>/<repo>/main/revocations.bin
+;                                                     ; optional: downloaded (curl) every
+; revocation_poll_s = 300                             ; revocation_poll_s, saved to revocation_file.
+;                                                     ; A bad or older list is ignored.
 
 [timers]                               ; design 02 section 7
 pending_expiry_s = 10                  ; drop handshakes not confirmed (ACK/DATA) within this time

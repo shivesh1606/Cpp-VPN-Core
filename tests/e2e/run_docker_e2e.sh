@@ -6,6 +6,9 @@
 #   C) node.conf without a key -> refuses to start
 #   D) v2 client that is not in allowed_clients -> no session (HS_DROP_AUTH)
 #   E) accept_v1 = false -> v1 is refused, v2 still works
+#   F) auth.mode = ticket with vpnctl (design 03): issued bundle connects (and rekeys); a ticket out
+#      of scope / no ticket is refused; revoking a connected user drops the session within seconds
+#      (BYE) and the user cannot reconnect
 # v1 uses tests/e2e/v1_roundtrip.py; v2 uses build/vpn_client_v2 (ICMP echo through the tunnel).
 #
 # Usage: bash tests/e2e/run_docker_e2e.sh [image]     (default image: vpn-builder-stage)
@@ -72,6 +75,23 @@ echo "=== E: accept_v1 = false ==="
 start "$SETUP_NODE && EXTRA='--set node.accept_v1=false' && $RUN_SERVER"
 v1 >/dev/null 2>&1; result E-v1-refused $? 1
 v2 /root/client.key --count 2 >/dev/null; result E-v2-works $? 0
+
+echo "=== F: tickets issued by vpnctl ==="
+start "$SETUP_NODE && export VPNCTL_DIR=/root/issuer VPNCTL_PASSPHRASE=e2e-passphrase-0123   && $B/vpnctl init --kdf interactive >/dev/null && cp /root/issuer/tags.conf /etc/cppvpn/tags.conf   && $B/vpnctl node add --id local --host 127.0.0.1 --port 5555        --pub \$($B/vpn_server --pubkey /etc/cppvpn/node.key) --tags friends >/dev/null   && $B/vpnctl issue --user alice --tags friends --days 1 > /root/alice.txt 2>/dev/null   && $B/vpnctl issue --user bob --tags premium --nodes local > /root/bob.txt 2>/dev/null   && EXTRA=\"--set auth.mode=ticket --set node.tags=friends --set auth.issuer_pk.1=\$(cut -d' ' -f3 /root/issuer/issuer.pub)\"   && $RUN_SERVER"
+docker exec $C sh -c "$B/vpn_client_v2 --bundle /root/alice.txt --ping 10.8.0.1 --count 2 --rekey"; result F-bundle-rekey $? 0
+docker exec $C sh -c "$B/vpn_client_v2 --bundle /root/bob.txt --ping 10.8.0.1 --count 1" >/dev/null 2>&1; result F-out-of-scope $? 1
+v2 /root/client.key --count 1 >/dev/null 2>&1; result F-no-ticket $? 1
+# Revocation while connected: alice holds a session; revoke her and install the new list.
+docker exec -d $C sh -c "$B/vpn_client_v2 --bundle /root/alice.txt --ping 10.8.0.1 --count 1 --hold 40 >/tmp/hold.log 2>&1; echo \$? > /tmp/hold.rc"
+sleep 4
+docker exec $C sh -c "VPNCTL_DIR=/root/issuer VPNCTL_PASSPHRASE=e2e-passphrase-0123 $B/vpnctl revoke --user alice >/dev/null   && date +%s.%N > /tmp/revoked_at && cp /root/issuer/revocations.bin /etc/cppvpn/revocations.bin"
+for i in $(seq 1 20); do docker exec $C test -f /tmp/hold.rc && break; sleep 1; done
+rc=$(docker exec $C cat /tmp/hold.rc 2>/dev/null || echo none)
+[ "$rc" = 3 ]; result F-revoked-dropped $? 0
+docker exec $C sh -c "grep -E 'session ended|ENDED' /tmp/hold.log; grep -E 'Revocations:' /tmp/server.log | tail -2"
+docker exec $C sh -c "$B/vpn_client_v2 --bundle /root/alice.txt --ping 10.8.0.1 --count 1" >/dev/null 2>&1; result F-revoked-reconnect $? 1
+sleep 1
+docker exec $C sh -c "grep -E 'ticket=.* reason=' /tmp/server.log | sed 's/.*reason=/reason=/' | sort | uniq -c; grep 'v2: active' /tmp/server.log | tail -1 | grep -o 'ticket drop.*'"
 
 docker rm -f $C >/dev/null 2>&1
 [ $fail = 0 ] && echo "ALL E2E SCENARIOS PASSED" || echo "E2E FAILURES"

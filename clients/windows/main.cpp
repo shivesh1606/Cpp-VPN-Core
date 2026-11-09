@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <vector>
 #include <sodium.h>
 #include "wintun.h"
 
@@ -80,6 +81,12 @@ struct Config
     std::string client_key             = "client.key";  // from vpn_client --gen-key
     std::string offer                  = "chacha20poly1305,aes256gcm";
     int         rekey_after            = 120;           // seconds (design 02 section 7)
+    // bundle from vpnctl issue (design 03 section 5): sets server, port, server_pub, device key, ticket
+    std::string bundle;                                 // file path or cppvpn://import?b=...
+    std::string node;                                   // node id in the bundle (default: first)
+    bool        from_bundle            = false;
+    uint8_t     device_sk[32]          = {0};
+    std::vector<uint8_t> ticket;
 };
 
 static std::string trim(const std::string &s)
@@ -131,6 +138,8 @@ static Config loadConfig(const char *path)
         else if (key == "client_key")            cfg.client_key = val;
         else if (key == "offer")                 cfg.offer = val;
         else if (key == "rekey_after")           cfg.rekey_after = std::stoi(val);
+        else if (key == "bundle")                cfg.bundle = val;
+        else if (key == "node")                  cfg.node = val;
     }
     return cfg;
 }
@@ -772,6 +781,8 @@ static void printUsage()
         "  --gen-key FILE        create a client key, print its public key (for allowed_clients)\n"
         "  --pubkey FILE         print the public key of a client key file\n"
         "  --rekey-after SEC     v2 rekey interval (default 120)\n"
+        "  --bundle FILE|URI     vpnctl bundle (cppvpn://import?b=...): server, keys, ticket; implies v2\n"
+        "  --node ID             node of the bundle to use (default: the first)\n"
         "  -h, --help            Show this help\n";
 }
 
@@ -801,6 +812,8 @@ int main(int argc, char *argv[])
         else if (a == "--server-pub" && i + 1 < argc) { cfg.server_pub = argv[++i]; }
         else if (a == "--key" && i + 1 < argc)        { cfg.client_key = argv[++i]; }
         else if (a == "--rekey-after" && i + 1 < argc){ cfg.rekey_after = std::stoi(argv[++i]); }
+        else if (a == "--bundle" && i + 1 < argc)     { cfg.bundle = argv[++i]; }
+        else if (a == "--node" && i + 1 < argc)       { cfg.node = argv[++i]; }
         else if (a == "--gen-key" && i + 1 < argc)    { return (sodium_init() >= 0 && v2GenKey(argv[i + 1])) ? 0 : 1; }
         else if (a == "--pubkey" && i + 1 < argc)
         {
@@ -822,6 +835,8 @@ int main(int argc, char *argv[])
     }
 
     log_init(cfg);
+    if (!cfg.bundle.empty() && !v2ApplyBundle(cfg))
+        return 1;
     if (cfg.protocol != "v1" && cfg.protocol != "v2")
     {
         LOG_E("protocol must be v1 or v2");
@@ -835,6 +850,26 @@ int main(int argc, char *argv[])
     // ---- Winsock init ----
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
+
+    // Bundles may name the node by DNS: resolve once, the rest of the client works with the IPv4.
+    in_addr probe_addr{};
+    if (inet_pton(AF_INET, cfg.server.c_str(), &probe_addr) != 1)
+    {
+        addrinfo hints{}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(cfg.server.c_str(), nullptr, &hints, &res) != 0 || !res)
+        {
+            LOG_E("Cannot resolve server %s", cfg.server.c_str());
+            WSACleanup();
+            return 1;
+        }
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in *>(res->ai_addr)->sin_addr, ip, sizeof(ip));
+        freeaddrinfo(res);
+        LOG_I("Resolved %s -> %s", cfg.server.c_str(), ip);
+        cfg.server = ip;
+    }
 
     if (cfg.probe)
     {

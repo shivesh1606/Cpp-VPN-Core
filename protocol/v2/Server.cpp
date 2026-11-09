@@ -3,6 +3,7 @@
 #include <sodium.h>
 
 #include <algorithm>
+#include <cstdio>
 
 #include "crypto/CipherRegistry.h"
 #include "crypto/NodeIdentity.h"
@@ -35,6 +36,9 @@ struct Server::Session
     std::string cache_key;
     std::vector<uint8_t> msg2;
     std::string keylog_line;
+    bool has_ticket = false; // ticket mode: who this session belongs to (revocation, logs)
+    uint8_t user_id[16] = {0};
+    uint64_t ticket_id = 0;
 };
 
 namespace
@@ -159,11 +163,26 @@ Server::Rx Server::onInit(const uint8_t *pkt, size_t len, const Endpoint &from, 
     }
     const std::string s_c(reinterpret_cast<const char *>(hs.remoteStatic()), 32);
     // 5. authentication
+    AuthResult auth;
     if (cfg_.auth == ServerConfig::kAllowlist && !cfg_.allowed.count(s_c))
     {
         stats_.hs_drop_auth++;
         LOG(LOG_INFO, "v2 handshake rejected: client %s not in allowed_clients", shortKey(s_c).c_str());
         return Rx::kDropped;
+    }
+    if (cfg_.auth == ServerConfig::kTicket)
+    {
+        if (cfg_.authenticator)
+            auth = cfg_.authenticator->authenticate(hs.remoteStatic(), p1.ticket);
+        else
+            auth.reason = 1;
+        if (auth.reason)
+        {
+            stats_.hs_drop_ticket[auth.reason < kTicketReasons ? auth.reason : kTicketReasons - 1]++;
+            LOG(LOG_INFO, "v2 handshake rejected: client %s ticket=%016llx reason=%s", shortKey(s_c).c_str(),
+                (unsigned long long)auth.ticket_id, auth.reason_name[0] ? auth.reason_name : std::to_string(auth.reason).c_str());
+            return Rx::kDropped;
+        }
     }
     // 6. replay: timestamp must be newer than any seen for this client (G6)
     const std::string ts(reinterpret_cast<const char *>(p1.ts), kTai64nLen);
@@ -208,6 +227,12 @@ Server::Rx Server::onInit(const uint8_t *pkt, size_t len, const Endpoint &from, 
     s->created_ms = s->last_rx_ms = s->last_tx_ms = now_ms;
     s->ep = from;
     s->cache_key = cache_key;
+    if (cfg_.auth == ServerConfig::kTicket)
+    {
+        s->has_ticket = true;
+        std::memcpy(s->user_id, auth.user_id, 16);
+        s->ticket_id = auth.ticket_id;
+    }
 
     Payload2 p2{tun_ip, s->cipher_id, cfg_.keepalive_s};
     uint8_t p2buf[kPayload2Len];
@@ -264,9 +289,13 @@ Server::Rx Server::onInit(const uint8_t *pkt, size_t len, const Endpoint &from, 
     msg2_cache_[cache_key] = s->local_idx;
     last_ts_[s_c] = ts;
     const bool rekey = peer->current != 0;
-    LOG(LOG_INFO, "v2 %s: hsid=%s idx=%u client=%s ip=%s cipher=%s/%s state=PENDING",
+    char who[64] = "";
+    if (s->has_ticket)
+        std::snprintf(who, sizeof(who), " user=%s ticket=%016llx", hexOf(s->user_id, 4).c_str(),
+                      (unsigned long long)s->ticket_id);
+    LOG(LOG_INFO, "v2 %s: hsid=%s idx=%u client=%s ip=%s cipher=%s/%s%s state=PENDING",
         rekey ? "rekey" : "handshake", handshakeIdHex(s->hsid).c_str(), s->local_idx,
-        shortKey(s_c).c_str(), ipStr(tun_ip).c_str(), backend->algorithmName(), backend->implName());
+        shortKey(s_c).c_str(), ipStr(tun_ip).c_str(), backend->algorithmName(), backend->implName(), who);
     sessions_[s->local_idx] = std::move(s);
     stats_.hs_resp_sent++;
     return Rx::kReply;
@@ -437,6 +466,33 @@ bool Server::seal(uint32_t dst_tun_ip, const uint8_t *ip_pkt, size_t len, uint64
     out_len = sealPacket(s, kData, ip_pkt, len, now_ms, out);
     to = s.ep;
     return true;
+}
+
+size_t Server::revoke(const std::function<bool(const uint8_t user_id[16], uint64_t ticket_id)> &revoked,
+                      uint64_t now_ms, std::vector<Outgoing> &out)
+{
+    std::set<Peer *> hit;
+    for (auto &kv : sessions_)
+        if (kv.second->has_ticket && revoked(kv.second->user_id, kv.second->ticket_id))
+            hit.insert(kv.second->peer);
+    for (Peer *p : hit)
+    {
+        if (p->current)
+        {
+            Session &s = *sessions_.at(p->current);
+            Outgoing o; // tell the client right away instead of letting it time out
+            o.to = s.ep;
+            o.pkt.resize(kTransportMinLen);
+            o.pkt.resize(sealPacket(s, kBye, nullptr, 0, now_ms, o.pkt.data()));
+            out.push_back(std::move(o));
+        }
+        const uint32_t ids[] = {p->current, p->next, p->previous};
+        for (uint32_t id : ids)
+            if (id)
+                removeSession(id, "revoked"); // the last one frees the peer and its IP
+        stats_.removed_revoked++;
+    }
+    return hit.size();
 }
 
 void Server::tick(uint64_t now_ms, std::vector<Outgoing> &out)

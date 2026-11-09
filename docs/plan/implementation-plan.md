@@ -31,7 +31,7 @@ M3 Node config & identity ────┴─────────────
 | M2 | libsodium backend, KATs, `crypto_bench`, experiment 002 | **In review** (branch `feature/m2-libsodium`); experiment 002 target-node runs deferred (2026-11-08) | M1 |
 | M3 | Node config file and node identity key | **In review** (branch `feature/m3-node-config`) | — |
 | M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | **In review** (branch `feature/m4-protocol-v2`); experiments 003/004 deferred | M2, M3 |
-| M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | Not started | M4 |
+| M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | **In review** (branch `feature/m5-tickets`) | M4 |
 | M6 | Android: v2 + tickets + QR import | Not started | M5 |
 | M7 | Retire v1; docs and README refresh | Not started | M6 |
 
@@ -247,6 +247,33 @@ Design 03.
 - `vpnctl issue` → bundle → the Windows client connects.
 - Each verification failure maps to its own counter.
 - A revoked user is dropped within one poll interval.
+
+**Delivered (2026-11-09)**
+- **Format code**, portable: [auth/Ticket](../../auth/Ticket.h) (136 B, §2.1 checks in order), [auth/RevocationList](../../auth/RevocationList.h) (signed, `seq` must grow), [auth/TagRegistry](../../auth/TagRegistry.h), [auth/Bundle](../../auth/Bundle.h).
+- **Node:**
+  - `auth.mode = ticket` through a `v2::Authenticator` hook at design 02 step 5;
+  - `hs_drop_ticket[]` counts each reason separately, and logs name it;
+  - the ticket is checked again on every rekey;
+  - when a list arrives, matching sessions are dropped with a **BYE** and their IPs freed.
+- **Revocation sources:** `revocation_file` (reloaded within 1 s when it changes) and the optional `revocation_url` (background `curl` thread every `revocation_poll_s`; saved to the file).
+- **Config:** ticket mode needs `node.tags`, `issuer_pk.N` and a `tags_file` that knows the tags, or the node refuses to start. New keys `tags_file`, `revocation_file`, `revocation_poll_s`.
+- **`vpnctl`:** [tools/vpnctl.cpp](../../tools/vpnctl.cpp) with `init`, `node add/list/remove`, `issue`, `revoke`, `users`, `inspect`.
+  - The issuer key is encrypted with Argon2id + secretbox ([auth/IssuerKey](../../auth/IssuerKey.h)) and never overwritten.
+  - The data directory is `0700`; the key and bundles are `0600`.
+- **Clients:** `--bundle FILE|URI` (with `--node ID`) for the Linux `vpn_client_v2` and the Windows client. Bundle hosts may be DNS names. `vpn_client_v2 --hold SEC` exits with code 3 when the server ends the session.
+- **Tests:**
+  - 172 GoogleTest cases with OpenSSL, 156 without. 24 are new: ticket layout pinned to the design bytes; every §2.1 reason; key rotation; revocation format, tampering and rollback; tags; bundle; issuer key file; fetcher; ticket mode in the engines (each reason moves exactly one counter, revoke + BYE, expired ticket on rekey).
+  - Docker now has `curl`, so the fetch test runs there.
+- **e2e scenario F**, all pass: `vpnctl` bundle connect + rekey; out-of-scope ticket and missing ticket refused; a connected user revoked → BYE (exit 3); reconnect refused (`revoked`).
+- **Windows client + Docker node:**
+  - a `vpnctl` bundle connects (handshake 5 ms; 2 rekeys re-present the ticket);
+  - revoked mid-session → "Server sent BYE" within about 1 s of the list reaching the node;
+  - every reconnect is refused (`reason=revoked`).
+- **Not done:**
+  - QR rendering (M6, `qrencode` hint printed);
+  - a `vpnctl` key-rotation command (P12);
+  - a real https `revocation_url` test (needs a published file; the curl path is unit-tested with `file://`);
+  - Windows tunnel mode (admin).
 
 ## M6 — Android v2 + tickets
 

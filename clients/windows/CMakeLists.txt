@@ -17,6 +17,7 @@ set(SHARED_V2_SOURCES
     ${REPO_ROOT}/protocol/v2/Client.cpp
     ${REPO_ROOT}/crypto/CipherRegistry.cpp
     ${REPO_ROOT}/crypto/Base64Url.cpp
+    ${REPO_ROOT}/auth/Bundle.cpp
     ${REPO_ROOT}/crypto/backends/XorBackend.cpp
     ${REPO_ROOT}/crypto/backends/SodiumAead.cpp
 )

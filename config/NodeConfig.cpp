@@ -7,6 +7,7 @@
 #include <functional>
 #include <sstream>
 
+#include "auth/TagRegistry.h"
 #include "crypto/CipherRegistry.h"
 #include "crypto/NodeIdentity.h"
 #include "net/ip/Cidr.h"
@@ -88,7 +89,6 @@ std::string registeredAlgorithms()
     return s;
 }
 
-constexpr const char *kNotYetM5 = "accepted, but not used until tickets (milestone M5)";
 
 using Handler = std::function<void(Ctx &, const std::string &)>;
 
@@ -106,7 +106,6 @@ const std::map<std::string, Handler> &fixedKeys()
              for (const auto &t : c.cfg.tags)
                  if (!simpleName(t, 32))
                      return c.error("invalid tag '" + t + "'");
-             c.warn(kNotYetM5);
          }},
         {"node.port", [](Ctx &c, const std::string &v) {
              int p = 0;
@@ -169,7 +168,7 @@ const std::map<std::string, Handler> &fixedKeys()
 #endif
              }
              else if (v == "ticket")
-                 c.error("'ticket' needs tickets (milestone M5); use 'allowlist' until then");
+                 c.cfg.auth_mode = v;
              else
                  c.error("expected open | allowlist | ticket, got '" + v + "'");
          }},
@@ -186,8 +185,18 @@ const std::map<std::string, Handler> &fixedKeys()
              if (v.rfind("https://", 0) != 0)
                  return c.error("must be an https:// URL");
              c.cfg.revocation_url = v;
-             c.warn(kNotYetM5);
          }},
+        {"auth.tags_file", [](Ctx &c, const std::string &v) {
+             if (v.empty())
+                 return c.error("path must not be empty");
+             c.cfg.tags_file = v;
+         }},
+        {"auth.revocation_file", [](Ctx &c, const std::string &v) {
+             if (v.empty())
+                 return c.error("path must not be empty");
+             c.cfg.revocation_file = v;
+         }},
+        {"auth.revocation_poll_s", [](Ctx &c, const std::string &v) { intKey(c, v, 30, 86400, c.cfg.revocation_poll_s); }},
         // ---- [timers] ----
         {"timers.pending_expiry_s", [](Ctx &c, const std::string &v) { intKey(c, v, 1, 300, c.cfg.pending_expiry_s); }},
         {"timers.dead_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 5, 86400, c.cfg.dead_after_s); }},
@@ -227,7 +236,6 @@ bool patternKey(Ctx &c, const std::string &section, const std::string &key, cons
         else
         {
             c.cfg.issuer_pk[static_cast<int>(id)] = v;
-            c.warn(kNotYetM5);
         }
         return true;
     }
@@ -320,9 +328,45 @@ NodeConfig loadNodeConfig(const std::string &path, const std::vector<std::string
         cfg.node_key = kDefaultNodeKeyPath;
     if (cfg.from_file && cfg.allowed_clients.empty())
         cfg.allowed_clients = kDefaultAllowedClientsPath;
+    if (cfg.from_file && cfg.tags_file.empty())
+        cfg.tags_file = kDefaultTagsPath;
+    if (cfg.from_file && cfg.revocation_file.empty())
+        cfg.revocation_file = kDefaultRevocationPath;
     if (cfg.from_file && cfg.auth_mode == "allowlist" && report.ok())
         loadAllowedClients(cfg.allowed_clients, cfg, report);
+    if (cfg.from_file && cfg.auth_mode == "ticket" && report.ok())
+    {
+        if (cfg.issuer_pk.empty())
+            report.errors.push_back("auth.mode = ticket needs at least one auth.issuer_pk.<key_id> "
+                                    "(vpnctl init prints the line)");
+        if (cfg.tags.empty())
+            report.errors.push_back("auth.mode = ticket needs node.tags (the ticket scope this node serves)");
+        else
+            loadNodeTags(cfg, report);
+    }
     return cfg;
+}
+
+bool loadNodeTags(NodeConfig &cfg, ConfigReport &report)
+{
+    std::string text, err;
+    if (!readTextFile(cfg.tags_file, text, err))
+    {
+        report.errors.push_back("auth.tags_file: " + err + " (copy tags.conf from the vpnctl directory)");
+        return false;
+    }
+    auth::TagRegistry reg;
+    if (!reg.parse(text, err))
+    {
+        report.errors.push_back(cfg.tags_file + ": " + err);
+        return false;
+    }
+    if (!reg.mask(cfg.tags, cfg.node_mask, err))
+    {
+        report.errors.push_back("node.tags: " + err);
+        return false;
+    }
+    return true;
 }
 
 bool loadAllowedClients(const std::string &path, NodeConfig &cfg, ConfigReport &report)
@@ -389,7 +433,10 @@ std::string describe(const NodeConfig &cfg)
     };
     o << "source            " << cfg.source << "\n";
     o << "node.id           " << (cfg.id.empty() ? "(unset)" : cfg.id) << "\n";
-    o << "node.tags         " << list(cfg.tags) << "\n";
+    o << "node.tags         " << list(cfg.tags);
+    if (cfg.node_mask)
+        o << " (mask 0x" << std::hex << cfg.node_mask << std::dec << ")";
+    o << "\n";
     o << "node.port         " << cfg.port << "/udp\n";
     o << "node.node_key     " << (cfg.node_key.empty() ? "(none: protocol v1 only)" : cfg.node_key) << "\n";
     o << "tunnel.tun_name   " << cfg.tun_name << "\n";
@@ -408,6 +455,16 @@ std::string describe(const NodeConfig &cfg)
     o << "auth.mode         " << cfg.auth_mode;
     if (cfg.auth_mode == "allowlist" && !cfg.allowed_clients.empty())
         o << " (" << cfg.allowed_keys.size() << " clients from " << cfg.allowed_clients << ")";
+    if (cfg.auth_mode == "ticket")
+    {
+        o << " (issuer keys:";
+        for (const auto &kv : cfg.issuer_pk)
+            o << " " << kv.first;
+        o << "; revocations from " << cfg.revocation_file
+          << (cfg.revocation_url.empty() ? std::string() : " + " + cfg.revocation_url + " every " +
+                                                            std::to_string(cfg.revocation_poll_s) + " s")
+          << ")";
+    }
     o << "\n";
     o << "timers            pending " << cfg.pending_expiry_s << " s, v1 idle sweep "
       << cfg.dead_after_s << " s, keepalive " << cfg.keepalive_s << " s, rekey " << cfg.rekey_after_s << " s, reject "

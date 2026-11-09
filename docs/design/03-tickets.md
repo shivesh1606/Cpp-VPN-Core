@@ -162,7 +162,7 @@ Ticket format and node verification are identical to Phase 0. Only the issuer ch
 | `auth/RevocationFetcher` | Periodic HTTPS GET, run off the packet loop (separate thread or forked helper; must not block `select()`) | Done: thread + `curl` (no shell), [auth/RevocationFetcher.h](../../auth/RevocationFetcher.h) |
 | `tools/vpnctl/` | CLI target (§5) | Done: [tools/vpnctl.cpp](../../tools/vpnctl.cpp) |
 | `node.conf` | `issuer_pk.<key_id>`, `tags`, `revocation_url`, `auth_mode = ticket` | Done, plus `tags_file`, `revocation_file`, `revocation_poll_s` ([deploy/node.conf.example](../../deploy/node.conf.example)) |
-| Android | QR import (`cppvpn://` deep link), Keystore-wrapped `device_sk`, ticket in `HS_INIT` payload | M6 |
+| Android | QR import (`cppvpn://` deep link), Keystore-wrapped `device_sk`, ticket in `HS_INIT` payload | Done (M6) in `NetSpeedv3`: `vpn/Bundle.kt`, `vpn/AccessStore.kt` (AES-GCM key in the Android Keystore wraps `device_sk`; `vpn_access.xml` excluded from backups), `AccessImportUi.kt` (QR scan, paste, deep link; always confirmed by the user) |
 
 ## 9. As implemented (M5)
 
@@ -206,7 +206,7 @@ Details the design left open, as built:
   - `crypto_pwhash` (Argon2id; `--kdf moderate` by default, 256 MiB) derives the key, and `crypto_secretbox` encrypts the Ed25519 secret key with it.
   - The `key_id` is inside the box too, so a header edit can't relabel the key.
   - `vpnctl` never overwrites an existing issuer key.
-- **QR codes:** `vpnctl` prints the `qrencode -t ansiutf8 < bundle.txt` command rather than drawing QR codes itself. The Android QR scan import comes in M6.
+- **QR codes:** `vpnctl` prints the `qrencode -t ansiutf8 < bundle.txt` command rather than drawing QR codes itself. The Android app scans that QR code (M6, zxing-android-embedded), or takes the `cppvpn://import?b=` link pasted or opened from a chat.
 - **Key rotation (§4):** nodes support several `issuer_pk.N` at once. A `vpnctl` command for rotating to a new `key_id` is not built yet ([parked P12](../plan/parked-discussions.md)).
 
 ## References

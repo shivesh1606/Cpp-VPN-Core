@@ -9,7 +9,7 @@ Topics raised but deliberately deferred, because they don't block the [implement
 | P3 | mac2 cookie DoS mechanism | Experiment 004 shows handshake CPU saturation, or before a public launch | Design 02 D2, §3.3 |
 | P4 | Monetization: tier enforcement, payments, device limits, quotas | Only if the project shows traction | Design 03 (`tier`, tags) |
 | P5 | Windows client GUI | When the CLI test client isn't enough | `clients/windows/` |
-| P6 | Server-pushed client settings (DNS, routes, MTU) | M6 (the Android app hardcodes DNS `8.8.8.8`) | Design 02 msg2 payload |
+| P6 | Server-pushed client settings (DNS, routes, MTU) | When a node needs its own DNS or routes. After M6 the Android app still hardcodes DNS `8.8.8.8`, MTU 1420 and a /32 address; msg2 carries only the tunnel IP, cipher and keepalive | Design 02 msg2 payload |
 | P7 | IPv6 (inner and outer) | After M7 | — |
 | P8 | Post-quantum hedge (Noise `IKpsk2`) | After M7 | Design 02 |
 | P9 | Engine scaling: `epoll`, `SO_REUSEPORT` multi-threading, `io_uring`, live config reload | When one core saturates on a node (experiment 002/003) | README performance goals |

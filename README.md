@@ -62,15 +62,15 @@ Incoming UDP packets are parsed for their custom **5-byte header** to determine 
 > **Security status:**
 > - **Protocol v2** (M4): a Noise IK handshake (X25519, BLAKE2b) authenticates both the server and the client, and every packet is AEAD-encrypted (ChaCha20-Poly1305 or AES-256-GCM). It runs whenever the node has a key, i.e. when a config file is used ([design 02](docs/design/02-handshake.md)).
 > - **Access control:** clients are admitted either by an allowlist of public keys, or (M5) by **signed tickets** from `vpnctl`. Tickets are bound to the device key and scoped by tags, they expire, and they can be revoked ([design 03](docs/design/03-tickets.md)).
-> - **Protocol v1** (XOR, toy Diffie-Hellman) gives **no** confidentiality, integrity or authentication. It stays enabled for the current Android app until it moves to v2 (M6); turn it off with `node.accept_v1 = false`.
+> - **Protocol v1** (XOR, toy Diffie-Hellman) gives **no** confidentiality, integrity or authentication. The Android app speaks v2 since M6 and keeps v1 only as a developer option; v1 stays on the node for older app builds until M7. Turn it off with `node.accept_v1 = false`.
 
 Target designs and their rationale are in [docs/design/](docs/design/README.md):
 
 | # | Document | Status | Implementation |
 |---|---|---|---|
-| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted | Done (M1–M2), on the wire since M4 |
-| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted | Done in M4 (allowlist auth; tickets in M5) |
-| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted | Phase 0 done in M5 |
+| 01 | [Pluggable transport cipher layer](docs/design/01-cipher-layer.md) | Accepted | Done (M1–M2), on the wire since M4; Android in M6 |
+| 02 | [Handshake (protocol v2)](docs/design/02-handshake.md) | Accepted | Done in M4 (allowlist auth; tickets in M5); Android initiator in M6 |
+| 03 | [Access tickets and issuer](docs/design/03-tickets.md) | Accepted | Phase 0 done in M5; Android import (QR, link) in M6 |
 | 04 | Multi-node deployment | 4a (node config and identity) accepted; rest parked | 4a done in M3 |
 
 - **Plan:** [implementation plan](docs/plan/implementation-plan.md) (milestones M0–M7) · [parked discussions](docs/plan/parked-discussions.md)
@@ -150,7 +150,7 @@ On the node, in `/etc/cppvpn/node.conf`:
 - `[node] tags = friends`
 - `[auth] mode = ticket` and the `issuer_pk.1 = …` line
 
-Then copy `tags.conf` to `/etc/cppvpn/`. Clients connect with `vpn_client_v2 --bundle alice.txt` (Linux) or `vpn_client.exe --bundle alice.txt` (Windows). A revoked user is dropped within a second of the new `revocations.bin` reaching the node, or within `revocation_poll_s` when it is published at `revocation_url`.
+Then copy `tags.conf` to `/etc/cppvpn/`. Clients connect with `vpn_client_v2 --bundle alice.txt` (Linux) or `vpn_client.exe --bundle alice.txt` (Windows). On Android (NetSpeed app, M6), open Profile → VPN access and scan the QR code (`qrencode -t ansiutf8 < alice.txt`) or paste the `cppvpn://import?b=…` link; the app confirms what the link grants before importing it. A revoked user is dropped within a second of the new `revocations.bin` reaching the node, or within `revocation_poll_s` when it is published at `revocation_url`.
 - **With `tun_cidr`** the server sets the `tun0` address itself. NAT (MASQUERADE) and the firewall stay part of the deployment.
 - **Reference:** every key is documented in [deploy/node.conf.example](deploy/node.conf.example); `vpn_server --help` lists the options.
 

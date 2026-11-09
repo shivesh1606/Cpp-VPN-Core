@@ -159,7 +159,20 @@ Wire cost: 16-byte tag per packet, plus the v2 header (14 B, up from 5 B). Inner
 | Build | [CMakeLists.txt:37-53](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/CMakeLists.txt#L37-L53) | libsodium required (static link), `WITH_OPENSSL` (optional); new `crypto_bench` target | Done (M2). libsodium is unconditional; there is no `WITH_LIBSODIUM` switch |
 | Docker | [Dockerfile:3-7](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/Dockerfile#L3-L7) | `apt-get install libsodium-dev` (static `libsodium.a`), optionally `libssl-dev` | Done (M2). Both installed; image built with `-DWITH_OPENSSL=ON` |
 | Stats | `enc_cycles`/`dec_cycles` ([utils/counter_definition.h:62-63](https://github.com/shivesh1606/Cpp-VPN-Core/blob/76f900c/utils/counter_definition.h#L62-L63)) | Unchanged; works for any backend. Add an `auth_fail` counter. | Done (M1): `rx_auth_fail`, `udp_rx_truncated` |
-| Android | XOR in `MyVpnService.kt` | Kotlin `SessionLock` interface; default implementation on [Lazysodium][lazysodium] | M6 |
+| Android | XOR in `MyVpnService.kt` | Kotlin `SessionLock` interface; default implementation on [Lazysodium][lazysodium] | Done (M6) on [BouncyCastle][bouncycastle] instead of Lazysodium (below): `vpn/SessionLock.kt` in the `NetSpeedv3` repo, ChaCha20-Poly1305 only (cipher id 1) |
+
+### Android crypto library: BouncyCastle, not Lazysodium (M6)
+
+The plan named Lazysodium. M6 uses `org.bouncycastle:bcprov-jdk18on` (1.79) for X25519, BLAKE2b and ChaCha20-Poly1305:
+
+| | Lazysodium (JNA + libsodium `.so`) | BouncyCastle (pure Java) |
+|---|---|---|
+| Unit tests | The Android artifact loads an Android `.so`, so JVM tests need a second artifact (`lazysodium-java`) with a host libsodium, or must run as instrumented tests on a device | Plain JVM tests: the Noise vector file and the live test against the C++ node run in `testDebugUnitTest` |
+| Native code in the APK | One `.so` per ABI, which must be 16 KB page-aligned for Android 15+ | None |
+| Call overhead | JNA per call (slower than JNI) | None; JIT-compiled Java |
+| Constant time | libsodium | BouncyCastle's X25519 and Poly1305 are written to be constant time |
+
+Byte compatibility does not depend on the library: the Kotlin code passes the same `Noise_IK_25519_ChaChaPoly_BLAKE2b` vectors as the C++ code ([design 02 §10](02-handshake.md#10-verification)). If profiling on a phone ever shows the AEAD as the bottleneck, a libsodium-backed `SessionLock` can be added behind the same interface.
 
 ## 5. Benchmark plan
 
@@ -252,7 +265,8 @@ Same laptop, now through the engine's `SessionLock` code, with all four AEAD bac
 - [WireGuard whitepaper][wg-paper] · [WireGuard protocol overview][wg-protocol]
 - [libsodium — AEAD constructions][sodium-aead] · [IETF ChaCha20-Poly1305][sodium-chacha] · [AES-256-GCM][sodium-aesgcm]
 - [OpenSSL — EVP AEAD interface][openssl-evp]
-- [Lazysodium for Android][lazysodium]
+- [Lazysodium for Android][lazysodium] · [BouncyCastle Java][bouncycastle] (used on Android instead, see §4)
+- [Android: 16 KB page sizes][android-16kb]
 
 [rfc8439]: https://www.rfc-editor.org/rfc/rfc8439
 [rfc8439-s4]: https://www.rfc-editor.org/rfc/rfc8439#section-4
@@ -267,3 +281,5 @@ Same laptop, now through the engine's `SessionLock` code, with all four AEAD bac
 [sodium-aesgcm]: https://doc.libsodium.org/secret-key_cryptography/aead/aes-256-gcm
 [openssl-evp]: https://docs.openssl.org/3.0/man3/EVP_EncryptInit/
 [lazysodium]: https://github.com/terl/lazysodium-android
+[bouncycastle]: https://www.bouncycastle.org/download/bouncy-castle-java/
+[android-16kb]: https://developer.android.com/guide/practices/page-sizes

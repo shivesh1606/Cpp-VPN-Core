@@ -32,7 +32,7 @@ M3 Node config & identity ────┴─────────────
 | M3 | Node config file and node identity key | **In review** (branch `feature/m3-node-config`) | — |
 | M4 | Protocol v2: Noise IK, v2 transport, session table; server + Windows client | **In review** (branch `feature/m4-protocol-v2`); experiments 003/004 deferred | M2, M3 |
 | M5 | Tickets: verifier, revocation, `vpnctl`, bundle import (Windows) | **In review** (branch `feature/m5-tickets`) | M4 |
-| M6 | Android: v2 + tickets + QR import | Not started | M5 |
+| M6 | Android: v2 + tickets + QR import | **In review** (app repo `NetSpeedv3`, branch `feature/m6-protocol-v2`; docs here on `feature/m6-android-v2`) | M5 |
 | M7 | Retire v1; docs and README refresh | Not started | M6 |
 
 ---
@@ -284,6 +284,53 @@ Design 03.
 | QR / `cppvpn://` bundle import; Keystore-wrapped `device_sk` | design 03 §5 |
 | VpnService MTU 1420 | design 01 §3 |
 | Remove the typed-IP flow (keep it as a developer option) | — |
+
+**Acceptance**
+- The Kotlin initiator passes the same Noise vectors as the C++ code.
+- The app connects to a ticket-mode node with an imported `vpnctl` bundle.
+- A revoked user is disconnected with a clear message.
+
+**Delivered (2026-11-09)**, in the app repo `NetSpeedv3` (private):
+- **Protocol v2 client** (`vpn/` package, no Android UI code):
+  - `Noise.kt` (HandshakeIK, CipherState, HKDF), `V2Wire.kt`, `V2Client.kt`, `SessionLock.kt` (ChaCha20-Poly1305), `ReplayWindow.kt`;
+  - `vpnMainLoopV2()` in `MyVpnService.kt`: 4 handshake tries (5 s + jitter); keepalive 15 s, rekey 120 s, reject-after 180 s; disconnect after 3× keepalive of silence; BYE ends the session with a message.
+- **Crypto library: BouncyCastle, not Lazysodium.** Pure Java, so the vectors and the interop test run as JVM tests, and there is no native `.so` to align for 16 KB pages. See [design 01 §4](../design/01-cipher-layer.md#android-crypto-library-bouncycastle-not-lazysodium-m6).
+- **Access import** (design 03 §5):
+  - by QR scan (zxing-android-embedded, no native code), pasted link, or `cppvpn://import` deep link;
+  - every path shows what the link grants (servers, expiry) and imports only after the user confirms;
+  - `device_sk` is wrapped by an AES-256-GCM key in the Android Keystore; `vpn_access.xml` is excluded from backup and device transfer.
+- **UI**, in the app's existing styles:
+  - VPN tab: access gate, node name/address and node picker in the server card, a Security row;
+  - Profile: a VPN ACCESS card (Scan QR, Paste link, Remove access);
+  - Settings: a "Legacy server (v1)" developer switch (typed IP, saved servers), and the Protocol row names the protocol in use.
+- **Tests:**
+  - 15 JVM unit tests: `NoiseTest` (cacophony + snow vectors from [tests/protocol/vectors/](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt)), `V2Test` (wire sizes, header, mac1, TAI64N, replay window, a real `vpnctl` bundle);
+  - `CrossImplementationTest` against the Docker node: handshake with a ticket, 6/6 ICMP echoes, rekey, BYE.
+- **Emulator test against the Docker node** (Medium_Tablet, API 35, 16 KB pages; the Pixel 8 Pro AVD had no network):
+
+  | Step | Result |
+  |---|---|
+  | Deep link → confirm → import | Stored; device key wrapped; VPN tab reloads |
+  | Connect to `10.0.2.2` | Handshake about 160 ms; IP 10.8.0.2; MTU 1420 / MSS 1380; ping 10.8.0.1 3/3 |
+  | Rekey | At 120 s, 14 ms; new session ID in the UI; ping still works |
+  | Node restarted (session lost) | App disconnects after 45 s of silence |
+  | `vpnctl revoke` | BYE about 1 s after the list reached the node; the app says "the server ended the session (access revoked…)" |
+  | Reconnect with the revoked ticket | Node logs `reason=revoked` 4 times; the app reports "Connection failed: no answer…" |
+  | Unreachable node (`127.0.0.1` from the emulator) | 4 tries, then "Connection failed" |
+  | Pasted link (new ticket) | Confirm says it replaces the current access; connects |
+  | Remove access while connected | Tunnel ends with BYE; prefs cleared; access gate shown |
+  | Legacy v1 switch | Typed IP + saved servers again; v1 connect and ping work; Security says "XOR (legacy v1, not encrypted)" |
+
+  For the connect steps, a local build skipped the Google sign-in check, because the emulator has no Google account. It was reverted and not committed.
+- **Fixed during the test:**
+  - the VPN tab did not reload after a deep-link import;
+  - the ring stayed on "Connect" after the first-time VPN consent dialog (a v1 bug too);
+  - re-importing reset the chosen node.
+- **Not done:**
+  - scanning a real QR code (the scanner opens and shows the camera; the emulator has no QR to point at);
+  - a physical device;
+  - server-pushed DNS/routes ([parked P6](parked-discussions.md));
+  - an instrumented UI test suite.
 
 ## M7 — Retire v1
 

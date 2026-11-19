@@ -198,7 +198,7 @@ recv HS_INIT
 
 ## 9. Code impact
 
-Status after M4 in the last column. v1 code stays until M7 (Android moves to v2 in M6).
+Status after M6 in the last column. v1 code stays until M7 (Android moved to v2 in M6; v1 is a developer option there).
 
 | Before | Change | Status |
 |---|---|---|
@@ -208,11 +208,11 @@ Status after M4 in the last column. v1 code stays until M7 (Android moves to v2 
 | [sessions/client/Client_Manager.*](../../sessions/client/Client_Manager.h) | Indexes `receiver_idx` / `s_c` / `tun_ip`; `generateSessionId()` (sequential) replaced by random unique `u32` | Done in `v2::Server` (random indexes); `ClientManager` now only owns the shared IP pool and v1 clients |
 | `handleHandshake` HELLO/ACK branches ([main.cpp:127-245](../../main.cpp#L127-L245)) | §5 pipeline; ACK handling per D3 | Done: `Server::onInit`, `Server::onTransport` |
 | `handleUdpToTun` lookup ([main.cpp:61-80](../../main.cpp#L61-L80)) | Lookup by `receiver_idx`, then `open()`, then endpoint update | Done (v2); the v1 lookup is unchanged |
-| Android app (separate repo `NetSpeedv3`): `MyVpnService.performHandshake()` in `MyVpnService.kt` | Kotlin initiator on Lazysodium; same test vectors | M6. The vector file is [tests/protocol/vectors/](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt) |
+| Android app (separate repo `NetSpeedv3`): `MyVpnService.performHandshake()` in `MyVpnService.kt` | Kotlin initiator on Lazysodium; same test vectors | Done (M6) on BouncyCastle ([design 01 §4](01-cipher-layer.md#android-crypto-library-bouncycastle-not-lazysodium-m6)): `vpn/Noise.kt`, `vpn/V2Wire.kt`, `vpn/V2Client.kt`, and `vpnMainLoopV2()` in `MyVpnService.kt`. The app's unit tests use a copy of the [vector file](../../tests/protocol/vectors/noise_ik_25519_chachapoly_blake2b.txt) |
 
 ## 10. Verification
 
-Status: 1 and 3 done in M4 ([tests/protocol/](../../tests/README.md)); 2 waits for the Kotlin client (M6). Cross-implementation was also checked between the Linux server (libsodium 1.0.18) and the Windows client (MinGW, libsodium 1.0.20).
+Status: all three done. 1 and 3 in M4 ([tests/protocol/](../../tests/README.md)). 1 and 2 for Kotlin in M6: `NoiseTest` runs the same vector file, and `CrossImplementationTest` (JVM, `CPPVPN_E2E_BUNDLE`) runs a live handshake with a ticket, ICMP echo, rekey and BYE against the C++ node in Docker. Cross-implementation was also checked between the Linux server (libsodium 1.0.18) and the Windows client (MinGW, libsodium 1.0.20).
 
 1. Noise test vectors for `Noise_IK_25519_ChaChaPoly_BLAKE2b` from the published vector sets (cacophony / snow; see the [Noise wiki test vectors][noise-vectors]). The same vector file is run in the C++ and Kotlin unit tests.
 2. Cross-implementation test: C++ responder against a Kotlin initiator (JVM test harness), compared byte for byte.
@@ -258,8 +258,8 @@ Details the design left open, as built:
 
 Still open:
 - the mac2 cookie (D2, [parked P3](../plan/parked-discussions.md));
-- tickets (M5);
-- the Kotlin initiator (M6);
+- tickets (M5, since done: [design 03](03-tickets.md));
+- the Kotlin initiator (M6, since done: §9);
 - experiments 003 (throughput, v1 vs v2) and 004 (HELLO flood vs mac1), deferred together with the other benchmarks.
 
 ## References

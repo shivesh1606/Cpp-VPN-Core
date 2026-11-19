@@ -114,3 +114,28 @@ TEST(Bundle, RejectsMalformedInput)
     EXPECT_FALSE(bundleFromText("cppvpn://import?b=!!!", d, err));
     EXPECT_FALSE(bundleFromText("", d, err));
 }
+
+// The Android app lists every node's id and host before importing (design 03 section 5). Links
+// can be crafted by anyone, so id and host are limited to plain ASCII name characters: no line
+// breaks to fake extra lines, no Unicode lookalikes or direction overrides, no "host:port".
+TEST(Bundle, NodeIdAndHostArePlainAsciiNames)
+{
+    auto decodes = [](const std::string &id, const std::string &host) {
+        Bundle b = sampleBundle();
+        b.nodes[0].id = id;
+        b.nodes[0].host = host;
+        const auto raw = encodeBundle(b);
+        Bundle d;
+        std::string err;
+        return decodeBundle(raw.data(), raw.size(), d, err);
+    };
+    EXPECT_TRUE(decodes("in-1", "35.200.10.20"));
+    EXPECT_TRUE(decodes("eu_2.backup", "vpn-2.example.org"));
+    EXPECT_FALSE(decodes("in-1\n- in-2 35.200.10.20", "203.0.113.9"));
+    EXPECT_FALSE(decodes("in 1", "35.200.10.20"));
+    EXPECT_FALSE(decodes("in-\xC3\xA9", "35.200.10.20"));                  // non-ASCII
+    EXPECT_FALSE(decodes("in-1", "203.0.113.9\n35.200.10.20"));
+    EXPECT_FALSE(decodes("in-1", "vpn.ex\xE2\x80\xAE" "elpmaxe.org"));      // U+202E override
+    EXPECT_FALSE(decodes("in-1", "35.200.10.20:5555"));
+    EXPECT_FALSE(decodes("in-1", "35.200.10.20/24"));
+}

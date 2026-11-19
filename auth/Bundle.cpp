@@ -16,6 +16,25 @@ Bundle::~Bundle()
     sodium_memzero(device_sk, sizeof(device_sk));
 }
 
+namespace
+{
+bool plainName(const std::string &s, size_t max_len)
+{
+    if (s.empty() || s.size() > max_len)
+        return false;
+    for (char c : s)
+    {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u >= 0x80 || (!std::isalnum(u) && c != '_' && c != '.' && c != '-'))
+            return false;
+    }
+    return true;
+}
+} // namespace
+
+bool validNodeId(const std::string &id) { return plainName(id, 32); }
+bool validNodeHost(const std::string &host) { return plainName(host, 253); }
+
 std::vector<uint8_t> encodeBundle(const Bundle &b)
 {
     std::vector<uint8_t> out{kBundleVersion, uint8_t(b.nodes.size())};
@@ -75,6 +94,11 @@ bool decodeBundle(const uint8_t *p, size_t len, Bundle &out, std::string &error)
         }
         n.id.assign(reinterpret_cast<const char *>(p + off), l);
         off += l;
+        if (!validNodeId(n.id))
+        {
+            error = "node id must be 1-32 characters [A-Za-z0-9_.-]";
+            return false;
+        }
         if (!need(1))
             return false;
         l = p[off++];
@@ -85,6 +109,11 @@ bool decodeBundle(const uint8_t *p, size_t len, Bundle &out, std::string &error)
         }
         n.host.assign(reinterpret_cast<const char *>(p + off), l);
         off += l;
+        if (!validNodeHost(n.host))
+        {
+            error = "node " + n.id + ": host must be an IPv4 address or DNS name [A-Za-z0-9_.-]";
+            return false;
+        }
         if (!need(2 + 32 + 4))
             return false;
         n.port = uint16_t(p[off] | p[off + 1] << 8);

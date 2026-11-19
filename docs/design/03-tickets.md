@@ -125,6 +125,10 @@ bundle = { ver u8, node_count u8, nodes[ {node_id, host, port u16, S_pub 32, tag
 
 - On import, the app stores `device_sk` wrapped with an Android Keystore AES-GCM key.
 - The bundle is a secret: share it only over a private channel.
+- **What the import dialog shows (added 2026-11-19):** every node as `id: host:port (key <first 8 chars of S_pub>)`, before anything is stored.
+  - Anyone can craft a `cppvpn://` link, and the node id is just a label its author picks. Host and key are what decide where the traffic goes.
+  - The fingerprint matches the start of `vpn_server --pubkey` on the real node.
+  - `node_id` and `host` may only contain ASCII `[A-Za-z0-9_.-]` (`auth::validNodeId` / `validNodeHost`, mirrored in the app's `Bundle.decode`; `vpnctl node add` applies the same rule). Line breaks, Unicode lookalikes and direction overrides could otherwise fake lines in that dialog.
 
 ## 6. Revocation list
 

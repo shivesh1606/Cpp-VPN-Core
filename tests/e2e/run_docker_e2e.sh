@@ -1,8 +1,9 @@
 #!/bin/bash
 # End-to-end checks in Docker (needs a TUN device and NET_ADMIN, so not part of ctest).
 #   A) no config file  -> legacy behaviour: v1 only, tun0 configured externally, pool .2 x 100
-#   B) node.conf + key -> server configures tun0; v1 still works (accept_v1); v2 handshake, ping,
-#                         rekey and BYE work for an allowed client; lost ACK is covered by DATA
+#   B) node.conf + key -> server configures tun0; the startup log is flushed before any traffic;
+#                         v1 still works (accept_v1); v2 handshake, ping, rekey and BYE work for an
+#                         allowed client; lost ACK is covered by DATA
 #   C) node.conf without a key -> refuses to start
 #   D) v2 client that is not in allowed_clients -> no session (HS_DROP_AUTH)
 #   E) accept_v1 = false -> v1 is refused, v2 still works
@@ -55,6 +56,10 @@ docker exec $C sh -c "grep -E 'No node identity|client pool' /tmp/server.log"
 
 echo "=== B: node.conf + node key: v1 and v2 side by side ==="
 start "$SETUP_NODE && EXTRA= && $RUN_SERVER"
+# Before any packet: the startup log must reach the file (it used to wait for the first packet,
+# because only print_Stats() flushed and it runs only in seconds with traffic)
+docker exec $C sh -c 'for i in 1 2 3 4 5; do grep -q "Server started" /tmp/server.log && exit 0; sleep 1; done; exit 1'
+result B-idle-log-flushed $? 0
 v1; result B-v1 $? 0
 v2 /root/client.key --count 3 --rekey; result B-v2-rekey $? 0
 v2 /root/client.key --count 2 --drop-ack; result B-v2-lost-ack $? 0

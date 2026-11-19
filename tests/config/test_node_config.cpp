@@ -271,10 +271,30 @@ TEST_F(NodeConfigTest, XorNeedsExplicitInsecureOptIn)
     EXPECT_TRUE(hasError("expected true or false"));
 }
 
-TEST_F(NodeConfigTest, RejectAfterMustExceedRekeyAfter)
+// Every client rekeys after 120 s and gives up at 180 s (design 02 section 7). Neither value is
+// sent on the wire, so the node must keep keys at least 180 s or it drops sessions mid-rekey.
+TEST_F(NodeConfigTest, RejectAfterCoversTheClientsFixedRekeyWindow)
 {
-    load("[timers]\nrekey_after_s = 120\nreject_after_s = 120\n");
-    EXPECT_TRUE(hasError("reject_after_s (120) must be greater than rekey_after_s (120)")) << allErrors();
+    load("[timers]\nreject_after_s = 179\n");
+    EXPECT_TRUE(hasError("timers.reject_after_s (179) must be at least 180")) << allErrors();
+    // Passed the old "reject > rekey" rule, yet clients still rekeyed at 120 s: every v2 session
+    // was dropped (reject-after) at 60 s.
+    load("[timers]\nrekey_after_s = 30\nreject_after_s = 60\n");
+    EXPECT_TRUE(hasError("timers.reject_after_s (60) must be at least 180")) << allErrors();
+    load("[timers]\nreject_after_s = 180\n");
+    EXPECT_TRUE(report_.ok()) << allErrors();
+}
+
+TEST_F(NodeConfigTest, RekeyAfterIsIgnoredWithAWarning)
+{
+    load("[timers]\nrekey_after_s = 120\n");
+    EXPECT_TRUE(report_.ok()) << allErrors(); // node.conf files written before the fix still load
+    EXPECT_TRUE(hasWarning("timers.rekey_after_s: ignored")) << "the node never sent it to clients";
+}
+
+TEST(NodeConfigDefaults, RejectAfterMatchesTheClients)
+{
+    EXPECT_EQ(NodeConfig{}.reject_after_s, 180);
 }
 
 TEST_F(NodeConfigTest, IssuerKeysAndRevocationUrl)

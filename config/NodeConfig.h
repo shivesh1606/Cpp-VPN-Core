@@ -71,8 +71,10 @@ struct NodeConfig
     int pending_expiry_s = 10; // pending handshake expiry (v1 and v2)
     int dead_after_s = 60;     // protocol v1 idle sweep (v2 uses reject_after_s)
     int keepalive_s = 15;      // sent to v2 clients in HS_RESP; server keepalive interval
-    int rekey_after_s = 120;   // v2 clients rekey after this; must be < reject_after_s
-    int reject_after_s = 180;  // v2: drop session keys older than this / idle sessions
+    // v2: drop session keys older than this / idle sessions. At least v2::kRejectAfterS (180),
+    // because clients rekey at a fixed 120 s (v2::kRekeyAfterS) that is not configurable here:
+    // timers.rekey_after_s is accepted for old files but ignored with a warning.
+    int reject_after_s = 180;
 };
 
 struct ConfigReport

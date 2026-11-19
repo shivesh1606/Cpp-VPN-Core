@@ -301,10 +301,10 @@ int cmdNode(const Args &a)
         const std::string id = a.get("--id"), host = a.get("--host"), pub = a.get("--pub"), tags = a.get("--tags");
         const int port = std::atoi(a.get("--port", "5555").c_str());
         uint8_t pk[32];
-        if (!validName(id))
+        if (!auth::validNodeId(id))
             die("--id: 1-32 characters [A-Za-z0-9_.-]");
-        if (host.empty() || host.size() > 253 || host.find_first_of(" \t/") != std::string::npos)
-            die("--host: IPv4 address or DNS name of the node");
+        if (!auth::validNodeHost(host)) // same rule clients apply when decoding a bundle
+            die("--host: IPv4 address or DNS name of the node (characters [A-Za-z0-9_.-], no port)");
         if (port < 1 || port > 65535)
             die("--port: 1..65535");
         if (!crypto::fromBase64Url(pub, pk, 32))

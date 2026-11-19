@@ -745,6 +745,11 @@ int main(int argc, char **argv)
             {
                 LOG(LOG_INFO, "[SWEEP] Removed %d dead client(s)", swept);
             }
+
+            // print_Stats() flushes only in seconds with traffic. Without this, the startup log and
+            // anything logged while idle (expiry, idle removal, revocations) waited in the 64 KB
+            // buffer until the next packet arrived. No-op when nothing is buffered.
+            log_flush();
         }
 
         fd_set rf;

@@ -11,6 +11,7 @@
 #include "crypto/CipherRegistry.h"
 #include "crypto/NodeIdentity.h"
 #include "net/ip/Cidr.h"
+#include "protocol/v2/Wire.h" // kRekeyAfterS / kRejectAfterS (fixed client timers)
 
 namespace config
 {
@@ -201,7 +202,12 @@ const std::map<std::string, Handler> &fixedKeys()
         {"timers.pending_expiry_s", [](Ctx &c, const std::string &v) { intKey(c, v, 1, 300, c.cfg.pending_expiry_s); }},
         {"timers.dead_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 5, 86400, c.cfg.dead_after_s); }},
         {"timers.keepalive_s", [](Ctx &c, const std::string &v) { intKey(c, v, 0, 300, c.cfg.keepalive_s); }},
-        {"timers.rekey_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 10, 3600, c.cfg.rekey_after_s); }},
+        {"timers.rekey_after_s", [](Ctx &c, const std::string &) {
+             // Never sent to clients (payload2 has no such field); they rekey after a fixed 120 s.
+             // Still accepted so node.conf files copied from the old example keep loading.
+             c.warn("ignored: clients rekey after a fixed " + std::to_string(v2::kRekeyAfterS) +
+                    " s (not sent to them); remove this line");
+         }},
         {"timers.reject_after_s", [](Ctx &c, const std::string &v) { intKey(c, v, 10, 7200, c.cfg.reject_after_s); }},
     };
     return keys;
@@ -320,10 +326,12 @@ NodeConfig loadNodeConfig(const std::string &path, const std::vector<std::string
     if (wants_xor && !cfg.allow_insecure_xor)
         report.errors.push_back("crypto.algorithms: 'xor' is insecure; it needs "
                                 "crypto.allow_insecure_xor = true (benchmarks only)");
-    if (cfg.reject_after_s <= cfg.rekey_after_s)
-        report.errors.push_back("timers: reject_after_s (" + std::to_string(cfg.reject_after_s) +
-                                ") must be greater than rekey_after_s (" +
-                                std::to_string(cfg.rekey_after_s) + ")");
+    if (cfg.reject_after_s < int(v2::kRejectAfterS))
+        report.errors.push_back("timers.reject_after_s (" + std::to_string(cfg.reject_after_s) +
+                                ") must be at least " + std::to_string(v2::kRejectAfterS) +
+                                ": clients rekey after a fixed " + std::to_string(v2::kRekeyAfterS) +
+                                " s and give up at " + std::to_string(v2::kRejectAfterS) +
+                                " s, so a shorter value drops sessions that are still rekeying");
     if (cfg.from_file && cfg.node_key.empty())
         cfg.node_key = kDefaultNodeKeyPath;
     if (cfg.from_file && cfg.allowed_clients.empty())
@@ -467,8 +475,8 @@ std::string describe(const NodeConfig &cfg)
     }
     o << "\n";
     o << "timers            pending " << cfg.pending_expiry_s << " s, v1 idle sweep "
-      << cfg.dead_after_s << " s, keepalive " << cfg.keepalive_s << " s, rekey " << cfg.rekey_after_s << " s, reject "
-      << cfg.reject_after_s << " s\n";
+      << cfg.dead_after_s << " s, keepalive " << cfg.keepalive_s << " s, client rekey "
+      << v2::kRekeyAfterS << " s (fixed), reject " << cfg.reject_after_s << " s\n";
     return o.str();
 }
 

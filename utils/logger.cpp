@@ -30,13 +30,15 @@ static inline void flush_internal()
     g_pos = 0;
 }
 
-static inline void ensure_space(size_t need)
+// True when `need` bytes fit at g_pos (flushing first if necessary); false drops the line.
+static inline bool ensure_space(size_t need)
 {
     if (need > LOG_BUF_SIZE)
-        return; // drop oversized log
+        return false;
 
     if (g_pos + need > LOG_BUF_SIZE)
         flush_internal();
+    return g_pos + need <= LOG_BUF_SIZE;
 }
 
 /* ---------- public API ---------- */
@@ -120,11 +122,15 @@ void log_write(LogLevel lvl, const char* fmt, ...)
 
     if (msg_len <= 0)
         return;
+    // vsnprintf returns the length the message would have had; msg holds at most sizeof(msg) - 1
+    if (static_cast<size_t>(msg_len) >= sizeof(msg))
+        msg_len = static_cast<int>(sizeof(msg) - 1);
 
     size_t total =
         ts_len + strlen(lvl_str) + msg_len + 1;
 
-    ensure_space(total);
+    if (!ensure_space(total))
+        return;
 
     memcpy(g_buf + g_pos, ts, ts_len);
     g_pos += ts_len;

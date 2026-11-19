@@ -35,6 +35,7 @@ add_executable(unit_tests
     auth/test_tags_bundle.cpp
     auth/test_issuer_key.cpp
     auth/test_fetcher.cpp
+    utils/test_logger.cpp
 )
 target_link_libraries(unit_tests PRIVATE vpn_core GTest::gtest_main)
 target_compile_definitions(unit_tests PRIVATE CPPVPN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

@@ -51,6 +51,12 @@ constexpr size_t kPayload2Len = 7;
 constexpr size_t kMaxOffer = 8;
 constexpr size_t kMaxTicket = 512;
 
+// Client timers (section 7, WireGuard REKEY_AFTER_TIME / REJECT_AFTER_TIME). Fixed in every client
+// and NOT sent on the wire (payload2 carries only keepalive_s), so a node must keep session keys at
+// least kRejectAfterS: a shorter reject-after drops sessions whose client is still rekeying.
+constexpr uint32_t kRekeyAfterS = 120;
+constexpr uint32_t kRejectAfterS = 180;
+
 constexpr size_t kPayload1MinLen = kTai64nLen + 1 + 2;
 constexpr size_t kInitMinLen = kInitHeaderLen + noise::HandshakeIK::kMsg1Overhead + kPayload1MinLen + kMacsLen;
 constexpr size_t kInitMaxLen = kInitMinLen + kMaxOffer + kMaxTicket;

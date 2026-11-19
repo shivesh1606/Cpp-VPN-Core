@@ -247,7 +247,9 @@ Details the design left open, as built:
   - The IP is freed when the client's last session goes: BYE, pending expiry, reject-after or idle.
 - **Previous key:** after a rekey the old session stays accepted on receive, so in-flight packets still decrypt. It's removed when the next rekey supersedes it, or at reject-after. The server sends only with the current key.
 - **Server keepalive:** the server sends `KEEPALIVE` after `keepalive_s` without sending anything. Clients therefore treat 3 × `keepalive_s` of silence as a lost session and reconnect.
-- **Rekey:** the client starts a new HS_INIT at `rekey_after_s` and repeats it every 5 s until the HS_RESP arrives. Traffic keeps flowing under the old key in the meantime. If no rekey succeeds by 180 s, the client reconnects.
+- **Rekey:** the client starts a new HS_INIT after 120 s and repeats it every 5 s until the HS_RESP arrives. Traffic keeps flowing under the old key in the meantime. If no rekey succeeds by 180 s, the client reconnects.
+  - Both values are fixed in every client ([`v2::kRekeyAfterS` / `kRejectAfterS`](../../protocol/v2/Wire.h)) and are not sent on the wire: `payload2` carries only `keepalive_s`.
+  - So the node requires `[timers] reject_after_s` ≥ 180; a shorter value would drop sessions that are still rekeying. `rekey_after_s` was removed from `node.conf` (an old line is ignored with a warning), because the node never sent it to clients.
 - **`auth_mode`:**
   - `allowlist` reads [`allowed_clients`](../../deploy/node.conf.example): one `<base64url key> [name]` per line.
   - `open` needs `-DALLOW_OPEN_AUTH=ON`.

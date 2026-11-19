@@ -37,6 +37,12 @@ struct Bundle
     ~Bundle();
 };
 
+// Node id and host characters: ASCII letters, digits, '_', '.', '-' (id 1..32, host 1..253, i.e.
+// an IPv4 address or DNS name). Clients show both before importing a bundle, so a crafted link
+// must not carry line breaks, Unicode lookalikes or direction overrides that fake what is shown.
+bool validNodeId(const std::string &id);
+bool validNodeHost(const std::string &host);
+
 std::vector<uint8_t> encodeBundle(const Bundle &b);
 bool decodeBundle(const uint8_t *p, size_t len, Bundle &out, std::string &error);
 

@@ -138,8 +138,11 @@ add_executable(vpn_client_v2 tools/vpn_client_v2.cpp)
 target_link_libraries(vpn_client_v2 PRIVATE vpn_core)
 
 # ---------------- vpnctl: Phase 0 ticket issuer (design doc 03 section 5) ----------------
+# QR code of issued bundles (PNG + terminal): vendored qrcodegen (MIT), not linked into vpn_server.
+add_library(vpnctl_qr STATIC third_party/qrcodegen/qrcodegen.cpp utils/QrImage.cpp)
+target_include_directories(vpnctl_qr PUBLIC .)
 add_executable(vpnctl tools/vpnctl.cpp)
-target_link_libraries(vpnctl PRIVATE vpn_core)
+target_link_libraries(vpnctl PRIVATE vpn_core vpnctl_qr)
 
 # ---------------- Unit tests (GoogleTest, run with ctest) ----------------
 include(CTest)   # defines BUILD_TESTING (default ON)

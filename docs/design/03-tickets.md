@@ -123,6 +123,7 @@ bundle = { ver u8, node_count u8, nodes[ {node_id, host, port u16, S_pub 32, tag
 ~230 B for one node → ~310 base64url chars; QR byte-mode capacity ≈ 2.9 KB → about 10 nodes
 ```
 
+- `vpnctl issue` writes the bundle as `bundles/<user>-<ticket>.txt` and its QR code as `.png` next to it, both mode 0600. It also draws the QR in the terminal, prints the path (plus the Windows path under WSL) and opens the image (`--no-qr`, `--no-open` to skip). `vpnctl qr FILE` redraws it later without the passphrase. The QR is made with the vendored [qrcodegen](../../third_party/qrcodegen/README.md) (MIT), so there is no `qrencode` dependency.
 - On import, the app stores `device_sk` wrapped with an Android Keystore AES-GCM key.
 - The bundle is a secret: share it only over a private channel.
 - **What the import dialog shows (added 2026-11-19):** every node as `id: host:port (key <first 8 chars of S_pub>)`, before anything is stored.

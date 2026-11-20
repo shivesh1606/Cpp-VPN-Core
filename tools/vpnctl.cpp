@@ -20,10 +20,16 @@
 //   revoked.ini      revoked users / tickets and the list sequence number
 //   revocations.bin  signed revocation list: publish at revocation_url or copy to nodes
 //   bundles/         issued bundles (cppvpn://import?b=...): SECRETS, they contain the device key
+#include <fcntl.h>
 #include <sodium.h>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+#include <climits>
+#include <cstdlib>
 
 #include <algorithm>
 #include <cctype>
@@ -46,6 +52,9 @@
 #include "config/Ini.h"
 #include "crypto/Base64Url.h"
 #include "crypto/backends/SodiumAead.h"
+#include "utils/QrImage.h"
+
+extern char **environ;
 
 namespace
 {
@@ -255,6 +264,89 @@ uint32_t tagMask(const auth::TagRegistry &r, const std::string &list)
     return m;
 }
 
+// ---------------- QR code of a bundle ----------------
+
+// Runs a program (no shell). With `out`, captures its stdout. Returns its exit status, -1 if it
+// could not be started.
+int runProgram(const std::vector<std::string> &args, std::string *out = nullptr)
+{
+    std::vector<char *> argv;
+    for (const auto &s : args)
+        argv.push_back(const_cast<char *>(s.c_str()));
+    argv.push_back(nullptr);
+    int fds[2] = {-1, -1};
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    if (out && pipe(fds) == 0)
+    {
+        posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&fa, fds[0]);
+    }
+    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    pid_t pid = 0;
+    const int rc = posix_spawnp(&pid, argv[0], &fa, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (fds[1] >= 0)
+        close(fds[1]);
+    if (rc != 0)
+    {
+        if (fds[0] >= 0)
+            close(fds[0]);
+        return -1;
+    }
+    if (out && fds[0] >= 0)
+    {
+        char buf[512];
+        ssize_t n;
+        while ((n = read(fds[0], buf, sizeof(buf))) > 0)
+            out->append(buf, size_t(n));
+        close(fds[0]);
+        while (!out->empty() && (out->back() == '\n' || out->back() == '\r'))
+            out->pop_back();
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+    {
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+bool onWsl()
+{
+    std::string rel, err;
+    if (!config::readTextFile("/proc/sys/kernel/osrelease", rel, err))
+        return false;
+    std::transform(rel.begin(), rel.end(), rel.begin(), [](unsigned char c) { return std::tolower(c); });
+    return rel.find("microsoft") != std::string::npos || rel.find("wsl") != std::string::npos;
+}
+
+// Writes the bundle's QR code to `png_path` (mode 0600: it carries the device key), draws it in the
+// terminal when stderr is one, prints where it is and, if `open`, shows it in the desktop viewer.
+void showQr(const std::string &uri, const std::string &png_path, bool open)
+{
+    const qr::Grid g = qr::encode(uri);
+    const std::vector<uint8_t> png = qr::toPng(g, 8, 4);
+    writeFile(png_path, std::string(png.begin(), png.end()), 0600);
+    char abs[PATH_MAX];
+    const std::string where = realpath(png_path.c_str(), abs) ? abs : png_path;
+    if (isatty(STDERR_FILENO))
+        std::fputs(("\n" + qr::toTerminal(g) + "\n").c_str(), stderr);
+    std::fprintf(stderr, "QR image: %s\n", where.c_str());
+    if (onWsl())
+    {
+        std::string win;
+        if (runProgram({"wslpath", "-w", where}, &win) == 0 && !win.empty())
+        {
+            std::fprintf(stderr, "  Windows path: %s\n", win.c_str());
+            if (open)
+                runProgram({"explorer.exe", win}); // exits 1 even when it opened the file
+        }
+    }
+    else if (open && (std::getenv("DISPLAY") || std::getenv("WAYLAND_DISPLAY")))
+        runProgram({"xdg-open", where});
+    std::fprintf(stderr, "  The QR code carries the device key: share it privately, delete it afterwards.\n");
+}
+
 // ---------------- commands ----------------
 
 int cmdInit(const Args &a)
@@ -432,9 +524,49 @@ int cmdIssue(const Args &a)
     for (const auto &n : b.nodes)
         std::fprintf(stderr, " %s", n.id.c_str());
     std::fprintf(stderr, "\nBundle saved to %s (mode 0600).\n"
-                         "SECRET: it contains the device key. Share it only over a private channel.\n"
-                         "QR code: qrencode -t ansiutf8 < %s\n", bundle_file.c_str(), bundle_file.c_str());
+                         "SECRET: it contains the device key. Share it only over a private channel.\n",
+                 bundle_file.c_str());
+    if (!a.has("--no-qr"))
+    {
+        try
+        {
+            showQr(uri, bundle_file.substr(0, bundle_file.size() - 4) + ".png", !a.has("--no-open"));
+        }
+        catch (const std::exception &e) // the bundle is saved either way
+        {
+            std::fprintf(stderr, "warning: no QR code (%s); later: vpnctl qr %s\n", e.what(), bundle_file.c_str());
+        }
+    }
     std::printf("%s\n", uri.c_str());
+    return 0;
+}
+
+// QR code of an existing bundle (no passphrase needed): vpnctl qr FILE|LINK [--out PNG] [--no-open]
+int cmdQr(const Args &a)
+{
+    if (a.words.size() < 2)
+        die("usage: vpnctl qr BUNDLE_FILE|cppvpn://... [--out FILE.png] [--no-open]");
+    const std::string arg = a.words[1];
+    const bool is_file = exists(arg);
+    auth::Bundle b;
+    std::string err;
+    if (!auth::bundleFromText(is_file ? readFile(arg) : arg, b, err))
+        die(err);
+    std::string out = a.get("--out");
+    if (out.empty())
+    {
+        if (!is_file)
+            die("--out FILE.png is needed for a pasted link");
+        out = (arg.size() > 4 && arg.compare(arg.size() - 4, 4, ".txt") == 0 ? arg.substr(0, arg.size() - 4) : arg) + ".png";
+    }
+    try
+    {
+        showQr(auth::bundleToUri(b), out, !a.has("--no-open"));
+    }
+    catch (const std::exception &e)
+    {
+        die(std::string("cannot make the QR code: ") + e.what());
+    }
     return 0;
 }
 
@@ -567,6 +699,8 @@ int usage()
                  "  node add --id ID --host HOST [--port P] --pub S_PUB --tags a,b\n"
                  "  node list | node remove --id ID\n"
                  "  issue    --user NAME --tags a,b [--days N | --hours N] [--nodes id,...] [--tier T]\n"
+                 "           [--no-qr] [--no-open]   (writes bundles/NAME-TICKET.txt and its QR code .png)\n"
+                 "  qr       BUNDLE_FILE|LINK [--out FILE.png] [--no-open]   QR code again, no passphrase\n"
                  "  revoke   --user NAME | --ticket ID\n"
                  "  users\n"
                  "  inspect  BUNDLE|FILE\n"
@@ -589,6 +723,11 @@ int main(int argc, char **argv)
         {
             if (s == "--help")
                 return usage();
+            if (s == "--no-qr" || s == "--no-open") // flags without a value
+            {
+                a.opts[s] = "1";
+                continue;
+            }
             if (i + 1 >= argc)
                 die(s + " needs a value");
             a.opts[s] = argv[++i];
@@ -607,5 +746,6 @@ int main(int argc, char **argv)
     if (cmd == "revoke") return cmdRevoke(a);
     if (cmd == "users") return cmdUsers(a);
     if (cmd == "inspect") return cmdInspect(a);
+    if (cmd == "qr") return cmdQr(a);
     return usage();
 }
